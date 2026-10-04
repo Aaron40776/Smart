@@ -12,7 +12,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 3 | Command execution | done |
 | 4/5 | Filesystem, paths, checkpoints, undo | done |
 | 6/7 | Persistence, locking, privacy, schema versions | done |
-| 8 | Claude process lifecycle, PID safety | pending |
+| 8 | Claude process lifecycle, PID safety | done |
 | 9 | Sessions, rollover, resume | pending |
 | 10/12 | Pipeline state, failure classification, verification, review | pending |
 | 11 | Planner and context robustness | pending |
@@ -140,6 +140,30 @@ caches (validated on read, rewritten often). The trust file refuses to overwrite
 
 New optional record fields (additive, no version bump): `TaskRecord.project`, `StepRecord.failure` (filled in by later phases), `UndoEntry.repo/prefix`.
 
+## Phase 8: Claude process lifecycle and Windows reliability (done)
+
+PID safety (see Phase 3 for the code): smart only ever signals a `ChildProcess` it spawned and still holds; `killTree` refuses once Node has
+seen it exit (`isRunning`), because only while Node holds the process handle is the pid guaranteed not to be reused on Windows. No pid is ever
+persisted or read back. Failed or partial `taskkill` falls back to ending the direct child. The verifier's delayed SIGKILL no longer fires after
+the command finished (it used to `taskkill /F` a pid 2 s after exit, a reuse hazard).
+
+Concrete fixes:
+- **One-shot `claude` with no output hung forever** (e.g. a login prompt or a hung hook in `smart -p` / CI). New `runner.startupTimeoutSec`
+  (default 120, 0 = off): a process that has written *nothing* by then is killed and fails with `noOutput`; anything that has started writing is
+  never cut off. Injected for every call by `pipeline/calls.ts`.
+- **A dead spare failed the call** (classifier fell back to defaults, planner to a single step): a taken spare that fails with no output is
+  retried once on a fresh process (nothing reached the model).
+- **Cancel during a model switch** waited up to 10 s for the switch timeout; the control request now listens to the abort signal.
+- **Two calls on one session** could run in two processes (`proc.busy` → one-shot `--resume` of the same session): calls are serialized per
+  session id. A failed call does not block the queue.
+- Stream line buffers are capped (64 MB) so a runaway line cannot grow memory without bound.
+- `SmartError.noOutput` marks failures that never reached the model (start-up timeout, exit with no stdout); Phase 10 classifies them as
+  environment failures.
+
+Tested: start-up failure, start-up timeout, no-output exit, long-but-alive call not cut off, mid-message death (call fails, never silently
+re-run; next call gets a new process), model switch refused/ignored/cancelled, process replacement waits for exit, keep-alive reuse,
+spares (dead before take, dead after take), serialization, cancellation, idle shutdown (existing).
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -156,6 +180,8 @@ New optional record fields (additive, no version bump): `TaskRecord.project`, `S
   `src/core/pipeline.ts`, `src/core/store/conversation.ts`, `src/ui/commands.ts`, `src/ui/App.tsx`.
 - Phase 6/7: `src/core/store/atomicFile.ts`, `src/core/store/schema.ts` (new), `src/core/store/tracker.ts`, `src/core/store/conversation.ts`,
   `src/core/store/trust.ts`, `src/core/store/limits.ts`, `src/core/claude.ts` (debug log mode).
+- Phase 8: `src/core/claude.ts`, `src/core/claudeProcess.ts`, `src/core/errors.ts`, `src/core/config.ts` (`runner.startupTimeoutSec`),
+  `src/core/pipeline/calls.ts`, `smart.config.example.json`, `ROUTING.md`, `test/fixtures/fake-claude-stream.mjs` (`FAKE_DIE_TURN`).
 
 ## Tests added or changed
 
@@ -175,6 +201,9 @@ New optional record fields (additive, no version bump): `TaskRecord.project`, `S
   owner-less lock by age, uncreatable lock folder, release safety, owner record, stores report a held lock, 0600 files, temp cleanup);
   new `test/core/schema.test.ts` (14: version handling, 0.3 files, damaged records, newer files never written, quarantine, pending validation,
   missing `updatedAt`, limits cache, foreign trust file). The 4-process concurrent writer test passes repeatedly. Result: 678 passed, 1 skipped.
+- Phase 8: `test/core/claude.test.ts` (+4 start-up timeout / no-output / runaway line), `test/core/claudeProcess.test.ts` (+4: cancel during
+  switch, per-session serialization, failed call does not block, mid-message death), `test/core/spares.test.ts` (+2 dead spares).
+  Result: 688 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

@@ -36,6 +36,7 @@ export function makeRun(run: RunClaudeFn, config: SmartConfig, hooks: CallHooks,
     try {
       return await run({
         ...o,
+        startupTimeoutMs: o.startupTimeoutMs ?? config.runner.startupTimeoutSec * 1000,
         onEvent: (e) => {
           if (e.kind === 'limits') hooks.onLimits(e.windows, e.status);
           o.onEvent?.(e);

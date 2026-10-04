@@ -134,6 +134,9 @@ The short tool-less calls (classify, plan, review, answers) use a spare `claude`
 and after each such call one for the next call of the same kind (at most three). A spare waits for its message and costs nothing until then, so
 Claude Code's start-up (about 1.3 s per call on Windows) happens while you type or while a step runs. In the debug log these calls show as
 `"session":"warm none"`. `runner.keepAlive: false` turns spares off too; `smart -p` does not use them.
+A `claude` that writes nothing at all within `runner.startupTimeoutSec` (default 120 s) of starting is stuck before reaching the model (a login prompt,
+a hanging hook or MCP server) and is ended; the task stops and stays available for `/resume` (a long step is never cut off: it keeps reporting progress).
+A pre-started spare that has died is replaced by a fresh `claude` for that call, without counting as a failure.
 `runner.leanCalls` (on by default) starts the tool-less classify, plan and review calls without your hooks, plugins, MCP servers and skills. `$env:SMART_DEBUG=1` writes one line per
 `claude` call to `%USERPROFILE%\.smart\debug.log` (start-up, first text, total) so you can see whether a slow call is Claude Code's own start-up or the model.
 

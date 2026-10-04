@@ -171,3 +171,50 @@ describe('kept-alive claude process', () => {
     expect(notices[0]).toMatch(/did not answer within 0 s.*runner\.keepAlive: false/);
   });
 });
+
+describe('kept-alive process: lifecycle edges', () => {
+  it('a cancel during a model switch ends at once instead of waiting for the switch to time out', async () => {
+    vi.stubEnv('FAKE_CONTROL', 'ignore'); // the switch is never confirmed
+    const t = setup({ controlMs: 20_000 });
+    await t.run(step());
+    const ac = new AbortController();
+    const started = Date.now();
+    const p = t.run(step({ model: 'opus', session: { id: 'sess-1', resume: true }, signal: ac.signal }));
+    setTimeout(() => ac.abort(), 100);
+    await expect(p).rejects.toMatchObject({ kind: 'cancelled' });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(t.oneShot).not.toHaveBeenCalled();
+  });
+
+  it('calls on one session never overlap: the second waits for the first', async () => {
+    vi.stubEnv('FAKE_SLOW_MS', '150');
+    const t = setup();
+    const order: string[] = [];
+    const a = t.run(step({ prompt: 'first' })).then((r) => { order.push(r.text); });
+    const b = t.run(step({ prompt: 'second', session: { id: 'sess-1', resume: true } })).then((r) => { order.push(r.text); });
+    await Promise.all([a, b]);
+    expect(order).toEqual(['reply 1 from sonnet', 'reply 2 from sonnet']); // same process, in order
+    expect(t.oneShot).not.toHaveBeenCalled(); // never a second process on the same session
+    expect(t.spawns()).toBe(1);
+  });
+
+  it('a failed call does not block the next one on the same session', async () => {
+    vi.stubEnv('FAKE_ERROR_TURN', '1');
+    const t = setup();
+    await expect(t.run(step())).rejects.toThrow(/something broke/);
+    expect((await t.run(step({ session: { id: 'sess-1', resume: true } }))).text).toBe('reply 2 from sonnet');
+  });
+});
+
+describe('kept-alive process that dies mid-message', () => {
+  it('fails that call (it may have done work, so it is not silently repeated) and starts a fresh process next time', async () => {
+    vi.stubEnv('FAKE_DIE_TURN', '1');
+    const t = setup();
+    await expect(t.run(step())).rejects.toMatchObject({ kind: 'claude' });
+    expect(t.oneShot).not.toHaveBeenCalled(); // never re-run behind your back
+    vi.unstubAllEnvs();
+    const next = await t.run(step({ session: { id: 'sess-1', resume: true } }));
+    expect(next.text).toBe('reply 1 from sonnet'); // a new process
+    expect(t.spawns()).toBe(2);
+  });
+});

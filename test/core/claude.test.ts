@@ -274,3 +274,40 @@ describe('argument boundaries', () => {
     expect(spawnOpts?.shell).toBeUndefined();
   });
 });
+
+describe('runClaude start-up timeout', () => {
+  it('ends a claude that writes nothing at all, and says the call never reached the model', async () => {
+    let child!: FakeChild;
+    const spawnImpl = fakeSpawn((c) => { child = c; }); // never writes anything
+    const err = await runClaude({ prompt: 'hi', model: 'haiku', cwd: '.', spawnImpl, startupTimeoutMs: 50 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SmartError);
+    expect((err as SmartError).message).toMatch(/no output within 0 s|no output within/);
+    expect((err as SmartError).noOutput).toBe(true);
+    expect(child.killed).toContain('SIGKILL');
+  });
+
+  it('a process that has started writing is never cut off by the start-up limit', async () => {
+    const spawnImpl = fakeSpawn((c) => {
+      c.stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init', model: 'haiku', session_id: 's' })}\n`);
+      setTimeout(() => {
+        c.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'late but fine', session_id: 's' })}\n`);
+        c.emit('close', 0);
+      }, 120);
+    });
+    expect((await runClaude({ prompt: 'hi', model: 'haiku', cwd: '.', spawnImpl, startupTimeoutMs: 40 })).text).toBe('late but fine');
+  });
+
+  it('marks a process that exited without a word as never having reached the model', async () => {
+    const spawnImpl = fakeSpawn((c) => { c.stderr.write('segfault'); c.emit('close', 139); });
+    const err = (await runClaude({ prompt: 'hi', model: 'haiku', cwd: '.', spawnImpl }).catch((e: unknown) => e)) as SmartError;
+    expect(err.kind).toBe('claude');
+    expect(err.noOutput).toBe(true);
+  });
+
+  it('drops a runaway line instead of buffering it forever', async () => {
+    const { MAX_LINE } = await import('../../src/core/claude.js');
+    const p = new StreamParser();
+    p.push('x'.repeat(MAX_LINE + 1));
+    expect(p.push(`\n${JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', session_id: 's' })}\n`).map((e) => e.kind)).toEqual(['result']);
+  });
+});

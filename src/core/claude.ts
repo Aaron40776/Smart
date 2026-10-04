@@ -34,6 +34,8 @@ const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v)
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+/** Longest stdout line kept while waiting for its end (a large tool result is a few MB). */
+export const MAX_LINE = 64 * 1024 * 1024;
 
 export function summarizeTool(name: string, input: unknown): string {
   const i = isObj(input) ? input : {};
@@ -77,6 +79,8 @@ export class StreamParser {
     this.buffer += chunk;
     const lines = this.buffer.split('\n');
     this.buffer = lines.pop() ?? '';
+    // One event is one line; a "line" this long is not one Claude Code wrote, and must not grow without bound.
+    if (this.buffer.length > MAX_LINE) this.buffer = '';
     return lines.flatMap((l) => this.parseLine(l));
   }
 
@@ -204,6 +208,12 @@ export interface RunClaudeOptions {
   streamInput?: boolean;
   /** `false`: no extended thinking (`MAX_THINKING_TOKENS=0` for this process). Undefined: Claude Code's default. */
   thinking?: boolean;
+  /**
+   * Give up when Claude Code has written nothing at all this long after it was started (default STARTUP_MS; 0 = wait forever).
+   * Claude Code reports itself ready before the model is called, so a silent process is stuck starting (a login prompt, a
+   * hung hook or MCP server), and nothing has been spent yet. A long-running step is never cut off: it keeps writing events.
+   */
+  startupTimeoutMs?: number;
   extraArgs?: string[];
   onEvent?: (e: ClaudeStreamEvent) => void;
   /** Injectable for tests. */
@@ -281,6 +291,19 @@ export function callError(detail: string, prefix: string): SmartError {
 }
 
 const KILL_GRACE_MS = 2000;
+/** See RunClaudeOptions.startupTimeoutMs (`runner.startupTimeoutSec`). */
+export const STARTUP_MS = 120_000;
+
+/** The error for a `claude` that never said anything: see RunClaudeOptions.startupTimeoutMs. */
+export function startupError(ms: number, stderr: string): SmartError {
+  const e = new SmartError(
+    'claude',
+    `Claude Code produced no output within ${Math.round(ms / 1000)} s of starting${stderr.trim() ? `: ${stderr.trim().slice(-300)}` : ''}.`,
+    'Run `claude` by itself to see what it waits for (a login, a hook, an MCP server). runner.startupTimeoutSec changes the limit.',
+  );
+  e.noOutput = true;
+  return e;
+}
 
 /** Runs one headless Claude Code call. The prompt goes over stdin (no argv size limits, no stdin wait). */
 export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
@@ -305,12 +328,22 @@ export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
     let hangTimer: NodeJS.Timeout | undefined;
+    let heard = false;
+    const startupMs = opts.startupTimeoutMs ?? STARTUP_MS;
+    const startTimer = startupMs > 0
+      ? setTimeout(() => {
+          if (heard) return;
+          killTree(child, 'SIGKILL');
+          finish(() => reject(startupError(startupMs, stderr)));
+        }, startupMs)
+      : undefined;
 
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       if (killTimer) clearTimeout(killTimer);
       if (hangTimer) clearTimeout(hangTimer);
+      if (startTimer) clearTimeout(startTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       fn();
     };
@@ -336,7 +369,10 @@ export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (c: string) => handle(parser.push(c)));
+    child.stdout?.on('data', (c: string) => {
+      heard = true;
+      handle(parser.push(c));
+    });
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (c: string) => {
       stderr = (stderr + c).slice(-4000);
@@ -359,7 +395,10 @@ export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
           }
           return resolve(result);
         }
-        reject(callError(stderr.trim() || `exit code ${code}`, 'Claude Code failed'));
+        const err = callError(stderr.trim() || `exit code ${code}`, 'Claude Code failed');
+        // Exited without a word on stdout: it never got to the model (a crash on start-up, a spare that had died).
+        if (!heard && err.kind === 'claude') err.noOutput = true;
+        reject(err);
       });
     });
   });

@@ -109,6 +109,8 @@ const ConfigSchema = z.object({
       /** Pick the thinking effort per step from the task (cheap for easy work, more for hard). An explicit `effort` below wins. */
       autoEffort: z.boolean().default(true),
       extraArgs: z.array(z.string()).default([]),
+      /** Give up on a `claude` that has written nothing this many seconds after starting (stuck on a login, hook or MCP server). 0 = wait forever. */
+      startupTimeoutSec: z.number().int().min(0).default(120),
       /** Optional `--effort` level per model tier, e.g. { "haiku": "low", "opus": "high" }. Unset = Claude Code default. */
       effort: z.object({ haiku: effort.optional(), sonnet: effort.optional(), opus: effort.optional() }).default({}),
     })

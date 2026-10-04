@@ -97,3 +97,38 @@ describe('spare processes for short calls', () => {
     expect(oneShot.mock.calls.every(([o]) => !o.streamInput)).toBe(true);
   });
 });
+
+describe('spares that died', () => {
+  it('a spare that exited while waiting is replaced by a fresh claude for that call, not reported as a failure', async () => {
+    const oneShot = vi.fn<RunClaudeFn>(async (o) => (o.spawnImpl ? runClaude(o) : cold));
+    const run: ClaudeRunner = createClaudeRunner({ keepAlive: true, command, oneShot });
+    cleanup.push(run);
+    vi.stubEnv('FAKE_DIE', '1'); // the spare started now dies at once
+    run.warm(classify());
+    await new Promise((r) => setTimeout(r, 300));
+    vi.unstubAllEnvs();
+    const r = await run(classify());
+    expect(r.text).toBe('cold start'); // answered by the fresh one-shot call
+    expect(oneShot).toHaveBeenCalledTimes(1); // the dead spare was not even offered (it had exited)
+  });
+
+  it('a spare that is taken but turns out dead is retried once on a fresh process', async () => {
+    const calls: boolean[] = [];
+    const oneShot = vi.fn<RunClaudeFn>(async (o) => {
+      calls.push(Boolean(o.spawnImpl));
+      if (o.spawnImpl) {
+        const { SmartError } = await import('../../src/core/errors.js');
+        const e = new SmartError('claude', 'Claude Code failed: exit code 3');
+        e.noOutput = true;
+        throw e;
+      }
+      return cold;
+    });
+    const run: ClaudeRunner = createClaudeRunner({ keepAlive: true, command, oneShot });
+    cleanup.push(run);
+    run.warm(classify());
+    const r = await run(classify());
+    expect(r.text).toBe('cold start');
+    expect(calls).toEqual([true, false]);
+  });
+});

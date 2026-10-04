@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // A stand-in for `claude -p --input-format stream-json`: one message per stdin line, running-total usage and cost like the real CLI.
 // Env: FAKE_DIE=1 exit at once (an unusable process), FAKE_SILENT=1 never answer (an old CLI waiting for stdin to close),
-//      FAKE_CONTROL=refuse|ignore refuse or ignore a model switch, FAKE_ERROR_TURN=n make message n an error result, FAKE_SLOW_MS delay per message.
+//      FAKE_CONTROL=refuse|ignore refuse or ignore a model switch, FAKE_ERROR_TURN=n make message n an error result, FAKE_SLOW_MS delay per message,
+//      FAKE_DIE_TURN=n crash in the middle of message n (after some output, before its result).
 import { createInterface } from 'node:readline';
 
 const args = process.argv.slice(2);
@@ -32,6 +33,7 @@ rl.on('line', async (line) => {
   total = { cost: total.cost + 0.01, input: total.input + 100, output: total.output + 10 };
   out({ type: 'system', subtype: 'init', model, session_id: sessionId });
   out({ type: 'assistant', message: { id: `m${turn}`, model, content: [{ type: 'text', text: `reply ${turn} from ${model}: ${d.message.content}` }], usage: { input_tokens: 100, output_tokens: 10 } } });
+  if (Number(process.env.FAKE_DIE_TURN) === turn) process.exit(9);
   const error = Number(process.env.FAKE_ERROR_TURN) === turn;
   out({
     type: 'result', subtype: error ? 'error_during_execution' : 'success', is_error: error, result: error ? 'something broke' : `reply ${turn} from ${model}`,
