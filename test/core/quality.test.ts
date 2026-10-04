@@ -126,6 +126,32 @@ describe('change tracking, /diff and /undo', () => {
     expect(existsSync(join(t.cwd, 'f.txt'))).toBe(false);
   });
 
+  it('/undo refuses to discard your own later edits to the task\'s files, and /undo force does it on purpose', async () => {
+    const t = await setup({ complexity: 'trivial', executor: (_n, cwd) => { write(cwd, 'base.txt', 'by the task\n'); write(cwd, 'other.txt', 'task file\n'); } });
+    await t.pipeline.runTask('edit things');
+    write(t.cwd, 'base.txt', 'by the task\nand then my own edit\n');
+    await t.pipeline.undo();
+    const refusal = t.of('notice').at(-1)!;
+    expect(refusal.level).toBe('warn');
+    expect(refusal.message).toMatch(/Not undone: a file that task changed was edited after it \(base\.txt\).*\/undo force/);
+    expect(readFileSync(join(t.cwd, 'base.txt'), 'utf8')).toBe('by the task\nand then my own edit\n');
+    expect(existsSync(join(t.cwd, 'other.txt'))).toBe(true); // nothing at all was touched
+    await t.pipeline.undo(true);
+    expect(readFileSync(join(t.cwd, 'base.txt'), 'utf8')).toBe('base\n');
+    expect(existsSync(join(t.cwd, 'other.txt'))).toBe(false);
+  });
+
+  it('/undo never applies an entry recorded for another repository location', async () => {
+    const t = await setup({ complexity: 'trivial', executor: (_n, cwd) => { write(cwd, 'base.txt', 'CHANGED\n'); } });
+    await t.pipeline.runTask('edit things');
+    const conv = (t.pipeline as unknown as { conv: { undo: { repo?: string }[] } }).conv;
+    expect(conv.undo[0]!.repo).toBeTruthy(); // recorded with the entry
+    conv.undo[0]!.repo = join(tmpdir(), 'some-other-clone');
+    await t.pipeline.undo();
+    expect(t.of('notice').at(-1)?.message).toMatch(/another repository location/);
+    expect(readFileSync(join(t.cwd, 'base.txt'), 'utf8')).toBe('CHANGED\n');
+  });
+
   it('/diff emits the unified diff of the last task', async () => {
     const t = await setup({ executor: (_n, cwd) => { write(cwd, 'base.txt', 'base\nadded line\n'); } });
     await t.pipeline.runTask('add a line');

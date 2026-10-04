@@ -168,7 +168,9 @@ describe('parseInput', () => {
     expect(parseInput('/model auto')).toEqual({ kind: 'model', tier: null });
     expect(parseInput('/quit')).toEqual({ kind: 'quit' });
     expect(parseInput('/new')).toEqual({ kind: 'new' });
-    expect(parseInput('/undo')).toEqual({ kind: 'undo' });
+    expect(parseInput('/undo')).toEqual({ kind: 'undo', force: false });
+    expect(parseInput('/undo force')).toEqual({ kind: 'undo', force: true });
+    expect(parseInput('/undo everything')).toMatchObject({ kind: 'error' });
     expect(parseInput('/usage')).toEqual({ kind: 'usage' });
     expect(parseInput('/limits')).toEqual({ kind: 'usage' });
     expect(parseInput('/cost')).toEqual({ kind: 'cost' });

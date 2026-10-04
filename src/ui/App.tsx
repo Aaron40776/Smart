@@ -238,7 +238,7 @@ export function App({ pipeline, bus, tracker, trackerPath, cwd, version, initial
       case 'config':
         return dispatch({ type: 'ui:info', text: pipeline.describe().join('\n') });
       case 'undo':
-        void pipeline.undo();
+        void pipeline.undo(cmd.force);
         return;
       case 'diff':
         void pipeline.diff();

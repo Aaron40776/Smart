@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -100,7 +100,7 @@ describe('GitCheckpoints', () => {
     writeFileSync(join(d, 'ignored.log'), 'stays');
     const end = (await c.snapshot())!;
     const r = await c.restore(start, end);
-    expect(r).toEqual({ restored: 2, removed: 1 });
+    expect(r).toEqual({ restored: 2, removed: 1, failed: [] });
     expect(readFileSync(join(d, 'a.txt'), 'utf8')).toBe('one\ntwo\n');
     expect(readFileSync(join(d, 'keep.txt'), 'utf8')).toBe('keep\n');
     expect(existsSync(join(d, 'gen'))).toBe(false); // empty parents are cleaned up too
@@ -195,3 +195,92 @@ describe('GitCheckpoints: scoped to the project directory (monorepo)', () => {
   });
 });
 
+
+describe('GitCheckpoints: restore stays inside the project', () => {
+  const linkable = process.platform !== 'win32'; // symlinks need extra rights on Windows; junction behaviour is covered by realpath there
+
+  it.runIf(linkable)('never deletes through a folder that now links outside the project', async () => {
+    const d = repo();
+    const outside = mkdtempSync(join(tmpdir(), 'smart-outside-'));
+    writeFileSync(join(outside, 'precious.txt'), 'do not delete');
+    const c = await cp(d);
+    const start = (await c.snapshot())!;
+    mkdirSync(join(d, 'gen'));
+    writeFileSync(join(d, 'gen', 'precious.txt'), 'made by the task');
+    const end = (await c.snapshot())!;
+    // After the task, `gen` is replaced by a link to a folder outside the project holding a file of the same name.
+    rmSync(join(d, 'gen'), { recursive: true });
+    symlinkSync(outside, join(d, 'gen'));
+    const r = (await c.restore(start, end))!;
+    expect(r.removed).toBe(0);
+    expect(r.failed).toEqual(['gen/precious.txt']);
+    expect(readFileSync(join(outside, 'precious.txt'), 'utf8')).toBe('do not delete');
+  });
+
+  it.runIf(linkable)('removes a link the task created without touching what it points to', async () => {
+    const d = repo();
+    const outside = mkdtempSync(join(tmpdir(), 'smart-outside-'));
+    writeFileSync(join(outside, 'target.txt'), 'keep me');
+    const c = await cp(d);
+    const start = (await c.snapshot())!;
+    symlinkSync(join(outside, 'target.txt'), join(d, 'link.txt'));
+    const end = (await c.snapshot())!;
+    const r = (await c.restore(start, end))!;
+    expect(r).toEqual({ restored: 0, removed: 1, failed: [] });
+    expect(existsSync(join(d, 'link.txt'))).toBe(false);
+    expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('keep me');
+  });
+
+  it.runIf(linkable)('writes restored files into the project even when a folder became a link (git replaces the link)', async () => {
+    const d = repo();
+    mkdirSync(join(d, 'sub'));
+    writeFileSync(join(d, 'sub', 'a.txt'), 'orig');
+    const outside = mkdtempSync(join(tmpdir(), 'smart-outside-'));
+    const c = await cp(d);
+    const start = (await c.snapshot())!;
+    writeFileSync(join(d, 'sub', 'a.txt'), 'changed');
+    const end = (await c.snapshot())!;
+    rmSync(join(d, 'sub'), { recursive: true });
+    symlinkSync(outside, join(d, 'sub'));
+    await c.restore(start, end, ['sub/a.txt']);
+    expect(existsSync(join(outside, 'a.txt'))).toBe(false);
+    expect(readFileSync(join(d, 'sub', 'a.txt'), 'utf8')).toBe('orig');
+  });
+
+  it('a rename is undone as a delete plus an add: the old name comes back, the new one goes', async () => {
+    const d = repo();
+    const c = await cp(d);
+    const start = (await c.snapshot())!;
+    renameSync(join(d, 'a.txt'), join(d, 'b.txt'));
+    const end = (await c.snapshot())!;
+    expect((await c.changes(start, end))!.files).toEqual([{ path: 'a.txt', status: 'D' }, { path: 'b.txt', status: 'A' }]);
+    expect(await c.restore(start, end)).toEqual({ restored: 1, removed: 1, failed: [] });
+    expect(readFileSync(join(d, 'a.txt'), 'utf8')).toBe('one\ntwo\n');
+    expect(existsSync(join(d, 'b.txt'))).toBe(false);
+  });
+
+  it('ignores paths outside the project folder even when a caller asks for them (monorepo)', async () => {
+    const d = repo();
+    mkdirSync(join(d, 'pkg'));
+    const c = await cp(join(d, 'pkg'));
+    const start = (await c.snapshot())!;
+    writeFileSync(join(d, 'pkg', 'mine.txt'), 'x');
+    writeFileSync(join(d, 'a.txt'), 'edited outside the project');
+    const end = (await c.snapshot())!;
+    const r = (await c.restore(start, end, ['a.txt', 'pkg/mine.txt']))!;
+    expect(r).toEqual({ restored: 0, removed: 1, failed: [] });
+    expect(readFileSync(join(d, 'a.txt'), 'utf8')).toBe('edited outside the project');
+    expect(existsSync(join(d, 'pkg'))).toBe(true); // never prunes the project folder itself
+  });
+
+  it('a failed git step reports null rather than success', async () => {
+    const d = repo();
+    const c = await cp(d);
+    const start = (await c.snapshot())!;
+    writeFileSync(join(d, 'a.txt'), 'x');
+    const end = (await c.snapshot())!;
+    expect(await c.restore('0'.repeat(40), end)).toBeNull(); // a tree that does not exist (gc'd, or another repository's)
+    expect(readFileSync(join(d, 'a.txt'), 'utf8')).toBe('x');
+    expect(await c.restore(start, end)).not.toBeNull();
+  });
+});

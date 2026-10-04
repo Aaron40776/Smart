@@ -603,7 +603,7 @@ export class Pipeline {
   /** Returns a description of the problems, or undefined when the step passes (or could not be reviewed). */
   private async review(task: string, step: PlanStep, files: string[], signal: AbortSignal, score?: number): Promise<string | undefined> {
     const emit = this.bus.emit.bind(this.bus);
-    const contents = gatherFiles(this.cwd, files, this.config.limits.maxContextBytes);
+    const contents = gatherFiles(this.cwd, files, this.config.limits.maxContextBytes, { skipSecrets: true });
     if (contents.length === 0) return undefined;
     // A step rated hard is checked by a stronger reviewer than the one that would check a rename.
     const tier = reviewerTier(score, this.config);
@@ -634,9 +634,9 @@ export class Pipeline {
     });
   }
 
-  /** Revert the working tree to how it was before the most recent task that changed files. */
-  undo(): Promise<void> {
-    return this.changes.undo();
+  /** Revert the working tree to how it was before the most recent task that changed files (`force`: even over later edits). */
+  undo(force = false): Promise<void> {
+    return this.changes.undo(force);
   }
 
   /** Publish a unified diff of the most recent task that changed files. */

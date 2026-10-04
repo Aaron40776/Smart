@@ -10,7 +10,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 1 | Baseline | done |
 | 2 | Security: permission defaults, project-config trust | done |
 | 3 | Command execution | done |
-| 4/5 | Filesystem, paths, checkpoints, undo | pending |
+| 4/5 | Filesystem, paths, checkpoints, undo | done |
 | 6/7 | Persistence, locking, privacy, schema versions | pending |
 | 8 | Claude process lifecycle, PID safety | pending |
 | 9 | Sessions, rollover, resume | pending |
@@ -90,6 +90,30 @@ startup). `src/core/which.ts` resolves programs to absolute paths from absolute 
 Intentionally unchanged: verify commands keep cmd.exe's normal lookup (a user's `run-tests.bat` in the project root keeps working); they are
 either the user's own/trusted `verify.commands` or the project's package.json scripts, which run project code by design (documented in README Safety).
 
+## Phase 4/5: filesystem, paths, checkpoints, undo (done)
+
+Reusable primitives in `src/core/paths.ts`: `unsafePathReason` (lexical, before any filesystem access), `resolveInside` (realpath containment,
+case-insensitive on Windows through `path.relative`), `realPathOf`, `looksSecret`. Used by `gatherFiles` (plan-step files, reviewer files,
+@mentions), `resolveMentions` folders, and checkpoint removal; the existing realpath protections in `runner.ts`/`mentions.ts` were kept and moved there.
+
+Concrete bugs fixed:
+- **UNC/device paths from model output** (`\\attacker\share\x` in a plan step's `files`) reached `existsSync`/`realpathSync`, which on Windows opens an
+  SMB connection (NTLM hash leak). Now refused lexically. Drive-relative (`C:x`), device names (`CON`, `NUL.txt`), ADS (`a:b`) refused too.
+- **Undo deleted through links**: `/undo` removed task-created files with `unlinkSync(root/rel)`; if a folder had since become a symlink/junction to
+  outside the project, a file outside was deleted. Removal now requires the folder's real path inside the repository (`removable`).
+  Verified separately that `git checkout-index` replaces a linked folder instead of writing through it.
+- **Undo pruned the project folder itself** in a monorepo subfolder when its last file was removed; pruning now stops at the project folder and
+  never descends into links.
+- **Undo silently overwrote later user edits** to files the task had changed: it now refuses (nothing touched) and names the files; `/undo force` does it on purpose.
+- **Undo reported success when a removal failed** (locked file on Windows): failures are listed, the entry is kept so `/undo` can be retried.
+- **Undo entries could be applied to another location**: entries now record `repo` and `prefix`; a mismatch is refused. Old entries (no `repo`) still work.
+- Persisted undo entries are validated (tree ids must be hex object ids) before use.
+- Secrets (`.env`, keys, `.npmrc`, ...) are no longer pasted into prompts on smart's own initiative (plan-step files, reviewer); an explicit @mention still works.
+- Duplicate file references (`a.ts`, `./a.ts`) are read once.
+
+Intentionally unchanged: two smart processes in the same folder can still interleave a task in one with `/undo` in the other (each has its own private
+index; there is no cross-process lock on the working tree). Git's own config (`core.fsmonitor`, filters) is the user's and is not overridden.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -102,6 +126,8 @@ either the user's own/trusted `verify.commands` or the project's package.json sc
   `smart.config.example.json`, `README.md`, `ROUTING.md`.
 - Phase 3: `src/core/which.ts` (new), `src/core/killTree.ts`, `src/core/claude.ts`, `src/core/claudeProcess.ts`, `src/core/spares.ts`,
   `src/core/checkpoint.ts`, `src/core/files.ts`, `src/core/verifier.ts`, `src/cli.tsx`.
+- Phase 4/5: `src/core/paths.ts` (new), `src/core/runner.ts`, `src/core/mentions.ts`, `src/core/checkpoint.ts`, `src/core/pipeline/changes.ts`,
+  `src/core/pipeline.ts`, `src/core/store/conversation.ts`, `src/ui/commands.ts`, `src/ui/App.tsx`.
 
 ## Tests added or changed
 
@@ -113,6 +139,10 @@ either the user's own/trusted `verify.commands` or the project's package.json sc
 - Phase 3: new `test/core/which.test.ts`; `test/core/killTree.test.ts` (absolute taskkill, no kill after exit, fallback when taskkill fails);
   `test/core/claude.test.ts` (missing claude on Windows, relative PATH ignored, argument boundaries, prompt over stdin with no shell).
   Result: 637 passed, 1 skipped.
+- Phase 4/5: new `test/core/paths.test.ts` (UNC/device/drive-relative/ADS/reserved names, symlink escape, absolute mentions, dedupe, secrets);
+  `test/core/checkpoint.test.ts` (+6: delete through a linked folder refused, link removed not its target, git replaces a linked folder,
+  rename undo, monorepo scope, failed git → null); `test/core/quality.test.ts` (+2: later-edit refusal and `/undo force`, foreign repo entry);
+  `test/ui/state.test.ts` (`/undo force`). Result: 654 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

@@ -7,7 +7,7 @@ export type Command =
   | { kind: 'help' }
   | { kind: 'quit' }
   | { kind: 'new' }
-  | { kind: 'undo' }
+  | { kind: 'undo'; force: boolean }
   | { kind: 'usage' }
   | { kind: 'cost' }
   | { kind: 'config' }
@@ -41,7 +41,8 @@ export function parseInput(raw: string): Command | null {
     case 'clear':
       return { kind: 'new' };
     case 'undo':
-      return { kind: 'undo' };
+      if (rest[0] && rest[0].toLowerCase() !== 'force') return { kind: 'error', message: `Unknown /undo option "${rest[0]}". Use /undo or /undo force.` };
+      return { kind: 'undo', force: rest[0]?.toLowerCase() === 'force' };
     case 'usage':
     case 'limits':
       return { kind: 'usage' };
@@ -112,7 +113,7 @@ export const HELP_TEXT = [
   '  /model <tier>     force haiku | sonnet | opus (or "auto" to route)',
   '  /dry              toggle dry-run (classify + plan only)',
   '  /new              start a fresh conversation (forget earlier tasks)',
-  '  /undo             revert the file changes of the last task (needs git)',
+  '  /undo             revert the file changes of the last task (needs git; /undo force also over your later edits)',
   '  /diff             show what the last task changed',
   '  /resume           continue a failed or cancelled task from its first unfinished step',
   '  /good, /bad       rate the last result; /bad makes smart use a stronger model for similar work',

@@ -148,7 +148,7 @@ describe('fewer, faster snapshots', () => {
       available: true, root: '/r', prefix: '',
       snapshot: async () => { n += 1; clock.t += delayMs; return `tree${n}`; },
       changes: async () => ({ files: [{ path: 'a.ts', status: 'M' }], insertions: 1, deletions: 0 }),
-      diff: async () => '', restore: async () => ({ restored: 0, removed: 0 }), dispose: () => undefined,
+      diff: async () => '', restore: async () => ({ restored: 0, removed: 0, failed: [] }), dispose: () => undefined,
       count: () => n,
     };
     return cp;

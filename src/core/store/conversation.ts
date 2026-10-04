@@ -31,6 +31,9 @@ export interface UndoEntry {
   prompt: string;
   start: string;
   end: string;
+  /** The repository root and project folder the snapshots were taken in (absent in entries saved by older versions). */
+  repo?: string;
+  prefix?: string;
 }
 
 /**
@@ -92,7 +95,9 @@ export function renderMemory(conv: Conversation, maxChars = 3500): string {
 
 function validUndo(u: unknown): UndoEntry[] | undefined {
   if (!Array.isArray(u)) return undefined;
-  const ok = u.filter((e): e is UndoEntry => !!e && typeof e.prompt === 'string' && typeof e.start === 'string' && typeof e.end === 'string');
+  const tree = (t: unknown) => typeof t === 'string' && /^[0-9a-f]{40,64}$/.test(t);
+  const ok = u.filter((e): e is UndoEntry => !!e && typeof e.prompt === 'string' && tree(e.start) && tree(e.end)
+    && (e.repo === undefined || typeof e.repo === 'string') && (e.prefix === undefined || typeof e.prefix === 'string'));
   return ok.length ? ok : undefined;
 }
 
