@@ -23,7 +23,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 19 | Installer and updater | done |
 | 20 | CI, package, release hygiene | done |
 | 21 | Performance | done |
-| 22 | Documentation | pending |
+| 22 | Documentation | done |
 | 24/25 | Final audit and validation | pending |
 
 ## Phase 1: baseline (done)
@@ -339,6 +339,17 @@ Phase 6 every atomic write fsyncs. It is a cache: unchanged reports are now re-s
 Measured the hot paths this work added: `forTerminal` on 20,000 streamed deltas 12 ms; `buildHistory` over 1000 tasks × 6 steps 4.4 ms.
 No speculative micro-optimizations.
 
+## Phase 22: documentation (done)
+
+Docs were updated in each phase alongside the code; this pass checked for anything made false and filled the gaps:
+- README: Safety (permissions, checks run project code, trust model, undo), install/update safety and pinning, `-p`/JSON fields, exit-code
+  table, `/mode default`, `smart trust`, `npm run bench`.
+- ROUTING.md: permissions + trust table, `--rate`, benchmark (with its assumptions and limits stated), learning exclusions, failure kinds in
+  escalation, `/undo` protections, resume context, persisted files (owner-only, atomic, locked, versioned, quarantine), start-up timeout.
+- CONTRIBUTING.md: layout (new modules, `bench/`, `scripts/`), ground rules (absolute program paths, untrusted model output, persistence).
+- CHANGELOG.md: an "Unreleased" entry. The version number was not bumped (a release decision for the maintainer).
+Claims are limited to what the code does; the docs drift test (`test/docs.test.ts`) passes.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -370,6 +381,7 @@ No speculative micro-optimizations.
 - Phase 18: `src/ui/App.tsx`, `src/ui/commands.ts`, `README.md`.
 - Phase 19/20: `src/update.ts`, `src/cli.tsx`, `install.ps1`, `.github/workflows/ci.yml`, `scripts/check-pack.mjs` (new), `README.md`.
 - Phase 21: `src/core/store/limits.ts`, `src/core/store/atomicFile.ts` (`durable` option).
+- Phase 22: `README.md`, `ROUTING.md`, `CONTRIBUTING.md`, `CHANGELOG.md`.
 
 ## Tests added or changed
 

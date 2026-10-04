@@ -107,8 +107,9 @@ Costs shown are what Claude Code reports. Routing rules and every setting: **[RO
 
 ```powershell
 npm install
-npm run check      # lint + typecheck + tests + build
+npm run check      # lint + typecheck + tests + build (no test calls the real Claude Code)
 npm run dev        # run from source
+npm run bench      # simulated routing benchmark; see ROUTING.md
 ```
 
 Layout and rules: [CONTRIBUTING.md](CONTRIBUTING.md). History: [CHANGELOG.md](CHANGELOG.md). `$env:SMART_DEBUG=1` logs per-call timings to `%USERPROFILE%\.smart\debug.log`; `$env:SMART_E2E=1; npm test -- test/e2e` runs one real Haiku task.

@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+**Safety**
+- **Steps run with `acceptEdits` by default** (was `bypassPermissions`), in the schema, `smart init` and the example config. `bypassPermissions` still works when
+  you choose it; it is shown in yellow in the header, and `/mode bypass` warns.
+- **A project's own `smart.config.json` is no longer trusted automatically**: settings that run commands, loosen permissions, pass flags to Claude Code, move
+  your history files or lift your budget are ignored (with a warning) until you run `smart trust` there. Trust is tied to the file's exact contents.
+- Programs (git, Claude Code, taskkill) are started by absolute path on Windows: a `git.exe` committed to a repository no longer runs when smart opens it.
+- Network paths (`\\server\share`), device names and other unsafe paths in model output are refused before the filesystem is touched; secrets (`.env`, keys)
+  are not pasted into prompts unless you @mention them; terminal escape sequences in model text are removed before display.
+- `/undo` never deletes through a folder that now links outside the project, refuses to overwrite your later edits to the task's files (`/undo force`
+  does it on purpose), and reports a file it could not remove.
+- `smart update` and the installer never discard local changes (they used to reset `package-lock.json`): they stop and list them; `smart update --stash`
+  sets them aside. Dependencies install with `npm ci --ignore-scripts`. The installer can pin a version (`SMART_REF`) and verify a commit (`SMART_COMMIT`).
+
+**Reliability**
+- A locked save no longer runs unprotected after 3 s; it is skipped with a warning. Stores are versioned: a newer smart's files are never overwritten.
+- A `claude` that never writes anything is ended after `runner.startupTimeoutSec` (120 s); a dead pre-started process is replaced without failing the call.
+- `/resume` gives the continuing step the conversation summary and the files earlier steps changed when its session is gone.
+- A check that cannot run (command not found) stops the step instead of escalating to Opus; a budget stop is not retried. Learning ignores such failures,
+  failures even the top model had, counts `/bad` once per task, and limits one project's weight.
+- Exit codes: 0 done, 1 not finished, 2 invalid usage or config, 3 Claude Code unavailable, 4 budget, 5 try later, 6 nothing to resume, 130 cancelled.
+  With `-p --output-format json`, stdout is always one JSON document (with `failure` and `exitCode`), also for errors before a task.
+- `smart --rate` uses the real router (keyword rules, account-limit downshift, warm cache) and explains what confidence means.
+
+**Tooling**
+- `npm run bench`: a reproducible, simulated routing benchmark (plus an optional `--live` mode against real Claude Code).
+- CI installs the commit under test, checks that the installer keeps local edits, and checks the npm package contents.
+
 ## 0.3.4 (2026-10-01)
 
 - Fix: when keep-alive turns out not to work with your Claude Code (the notice "Keeping Claude Code running between steps did not work here"), the pre-started spare processes for classify, plan and review calls now stop too. They use the same `--input-format stream-json` mode, so an older Claude Code that cannot keep a process alive may not take them either.

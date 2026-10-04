@@ -121,6 +121,11 @@ After a step runs, `smart` runs your checks. If they fail:
 2. then move **one tier up** `escalation.ladder` (`haiku → sonnet → opus`) and repeat;
 3. if the top model also fails, the step fails and later steps are not run.
 
+Not every failure is the model's, and those do not climb the ladder: a check that cannot run at all (command not found, exit 127 or 9009)
+stops the step at once with a message saying what to install or adjust (then `/resume`); a call Claude Code stopped at the budget is not
+retried; a Claude Code that never started gets one more try on the same model. A check that runs out of time (`verify.timeoutSec`) is
+retried like a failure, since the work itself may hang. `-p --output-format json` reports which it was in `failure.kind`.
+
 Checks are auto-detected from `package.json` scripts, in cheapest-first order: `typecheck`, `lint`, `build`, `test`
 (npm's placeholder test script is ignored). They run with the project's package manager: `packageManager` in `package.json`, else the lockfile
 (`pnpm-lock.yaml`, `yarn.lock`, `bun.lock`), else npm (also when that tool is not installed). Other languages are not guessed, because a first
@@ -177,9 +182,20 @@ In a git repository, `smart` snapshots the project directory before and after ea
 (`Changed 3 files (+120 −4)`), and powers `/diff` and `/undo`. Only the directory you started `smart` in is covered, so in a monorepo a sibling package is never reverted.
 Snapshots use Git's untracked-file cache in their private index, and the end-of-task snapshot is skipped when nothing ran after the last step's.
 If one still takes over 4 s (big repositories, especially on Windows), `smart` says so once and suggests `git config core.fsmonitor true`.
-`/undo` reverts only the files the task itself changed: your own edits to other files since then are kept. The last 20 tasks are remembered per directory, so `/undo`
+`/undo` reverts only the files the task itself changed: your own edits to other files since then are kept. If you have edited one of the task's own files since,
+`/undo` changes nothing and names the file (`/undo force` reverts it anyway). It never deletes through a folder that has become a link pointing outside the
+project, reports a file it could not remove (and keeps the entry so `/undo` can be retried), and refuses an entry recorded for another repository location.
+Files git ignores (`.env`, `node_modules`) are never snapshotted or touched. The last 20 tasks are remembered per directory, so `/undo`
 and `/diff` still work after you quit and start `smart` again (unless `git gc` has since removed the snapshot).
-Not a git repo? `git init` enables it. A failed or cancelled task can be continued with `/resume` (or `smart --resume`), from its first unfinished step.
+Not a git repo? `git init` enables it. A failed or cancelled task can be continued with `/resume` (or `smart --resume`), from its first unfinished step,
+also after a restart. If the saved Claude Code session is gone by then (or was replaced because it grew too big), the continuing step gets the
+conversation summary and the list of files the finished steps changed instead.
+
+**Your files under `%USERPROFILE%\.smart\`** (history, conversations, trust, account limits, prompt history) are written owner-only, atomically
+(a crash never leaves half a file) and under a lock: when another smart holds the lock for more than a few seconds, the save is skipped with a
+warning rather than done unprotected; a lock left by a crashed smart is taken over. History and conversations carry a format version: a file from
+a newer smart is read but never overwritten (so going back a version loses nothing), a damaged record is skipped, and an unreadable file is moved
+aside as `*.corrupt-<time>` rather than overwritten.
 
 **Usage limit reached**: when Claude refuses a call because your 5-hour or weekly limit is used up, `smart` stops the task at once instead of retrying or
 escalating to a bigger model (every call would be refused until the reset), says when the limit resets, and keeps the task for `/resume`.
