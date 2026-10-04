@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { isRunning, killTree } from './killTree.js';
 import type { SmartConfig } from './config.js';
 import { escalate } from './router.js';
 import type { ModelTier } from './types.js';
@@ -57,11 +59,17 @@ export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 const LOCKFILES: [string, PackageManager][] = [['pnpm-lock.yaml', 'pnpm'], ['yarn.lock', 'yarn'], ['bun.lockb', 'bun'], ['bun.lock', 'bun']];
 const installed = new Map<string, boolean>();
 
-/** Whether a command runs on this machine (through the shell, so Windows `.cmd` shims count). Asked once per process. */
+/**
+ * Whether a command runs on this machine (through the shell, so Windows `.cmd` shims count). Asked once per process.
+ * `bin` is one of smart's own fixed names, never text from a project. It is asked from your home folder with cmd.exe told not
+ * to look in the current folder, so a `pnpm.cmd` committed to a repository does not answer (and run) for the real one.
+ */
 export function hasCommand(bin: string): boolean {
   let ok = installed.get(bin);
   if (ok === undefined) {
-    ok = spawnSync(`${bin} --version`, { shell: true, stdio: 'ignore', timeout: 10_000, windowsHide: true }).status === 0;
+    ok = spawnSync(`${bin} --version`, {
+      shell: true, stdio: 'ignore', timeout: 10_000, windowsHide: true, cwd: homedir(), env: { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' },
+    }).status === 0;
     installed.set(bin, ok);
   }
   return ok;
@@ -116,12 +124,13 @@ export const defaultExec: ExecFn = (command, { cwd, signal, timeoutMs }) =>
     child.stderr?.on('data', append);
 
     const killGroup = (sig: NodeJS.Signals) => {
+      // Once the command has finished, its id may belong to another program: never signal it again (see killTree).
+      if (done || !child.pid) return;
       try {
-        if (!child.pid) return;
-        if (win) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).on('error', () => undefined);
-        else process.kill(-child.pid, sig);
+        if (win) killTree(child, sig);
+        else process.kill(-child.pid, sig); // the whole group: the shell and what it started, which may outlive it
       } catch {
-        /* already gone */
+        if (isRunning(child)) child.kill(sig);
       }
     };
     const stop = () => {

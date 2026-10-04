@@ -1,14 +1,22 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { programPath } from './which.js';
+
+/** git by absolute path on Windows (see which.ts); throws when it is not installed, so callers fall back to a walk. */
+const gitBin = (): string => {
+  const bin = programPath('git');
+  if (!bin) throw new Error('git not found');
+  return bin;
+};
 
 const SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.venv', '__pycache__', 'target']);
 
 /** Compact list of project files (tracked + untracked-not-ignored via git, else a shallow walk). */
 export function projectFiles(cwd: string, limit = 80): string[] {
   try {
-    const out = execFileSync('git', ['-c', 'core.quotepath=false', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 4 * 1024 * 1024,
+    const out = execFileSync(gitBin(), ['-c', 'core.quotepath=false', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
     });
     // Filter lazily and stop at `limit`: a repo with 100k files must not cost 100k stat calls, and node_modules or dist must not crowd out sources.
     const files: string[] = [];
@@ -50,8 +58,8 @@ export function folderFiles(cwd: string, folder: string, limit = 150): { files: 
   const rel = folder.replace(/[\\/]+$/, '');
   let all: string[];
   try {
-    const out = execFileSync('git', ['-c', 'core.quotepath=false', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', rel], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 4 * 1024 * 1024,
+    const out = execFileSync(gitBin(), ['-c', 'core.quotepath=false', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', rel], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
     });
     all = out.split('\0').filter((f) => f && !f.split('/').some((part) => SKIP.has(part)));
   } catch {

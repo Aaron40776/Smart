@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { buildArgs, callError, claudeCommand, debugTiming, runClaude, StreamParser, toSpawnError, writeDebug, type ClaudeCommand, type ClaudeResult, type RunClaudeFn, type RunClaudeOptions } from './claude.js';
+import { assertFound, buildArgs, callError, claudeCommand, debugTiming, runClaude, StreamParser, toSpawnError, writeDebug, type ClaudeCommand, type ClaudeResult, type RunClaudeFn, type RunClaudeOptions } from './claude.js';
 import { cancelled, SmartError } from './errors.js';
 import { killTree } from './killTree.js';
 import { sparable, Spares } from './spares.js';
@@ -70,6 +70,7 @@ export class ClaudeProcess {
   ) {
     this.model = first.model;
     const args = [...buildArgs(first), '--input-format', 'stream-json'];
+    if (spawnFn === nodeSpawn) assertFound(command);
     this.child = spawnFn(command.cmd, [...command.prefix, ...args], { cwd: first.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     this.child.stdout?.setEncoding('utf8');
     this.child.stdout?.on('data', (c: string) => this.onData(c));

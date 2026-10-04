@@ -9,7 +9,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | --- | --- | --- |
 | 1 | Baseline | done |
 | 2 | Security: permission defaults, project-config trust | done |
-| 3 | Command execution | pending |
+| 3 | Command execution | done |
 | 4/5 | Filesystem, paths, checkpoints, undo | pending |
 | 6/7 | Persistence, locking, privacy, schema versions | pending |
 | 8 | Claude process lifecycle, PID safety | pending |
@@ -68,6 +68,28 @@ restarts; `/resume`; usage/limit tracking; dry-run; `/rate` `/good` `/bad`; TUI;
 - `--config <path>` is explicitly supplied by the user and treated as trusted (documented); the global file is trusted.
 - Model names are validated (no leading `-`, no whitespace/control characters) so a config cannot smuggle a flag through `--model`.
 
+## Phase 3: command execution (done)
+
+Inventory of every process smart starts (and what changed):
+
+| Where | Program | Shell | Args from | cwd | Change |
+| --- | --- | --- | --- | --- | --- |
+| `claude.ts` runClaude, `claudeProcess.ts`, `spares.ts` | Claude Code | no | smart + config (`extraArgs` trust-gated, model names validated); prompt via stdin | project | Windows: absolute PATH entries only; not found → `missing`, nothing spawned (`assertFound`) |
+| `cli.tsx` | `claude --version` probe | no | fixed | was project, now home | probe never runs a project-folder binary |
+| `checkpoint.ts` | git | no | fixed + tree ids | repo root | absolute git path on Windows; `--no-textconv` on numstat |
+| `files.ts` | git ls-files | no | fixed + project-relative folder | project | absolute git path on Windows, `windowsHide` |
+| `verifier.ts` defaultExec | verify command | yes (intended: user/trusted commands and package.json scripts) | config / package.json | project | delayed kill only while running; Windows tree kill via `killTree` |
+| `verifier.ts` hasCommand | `pnpm/yarn/bun --version` | yes (fixed names) | fixed | was project, now home | `NoDefaultCurrentDirectoryInExePath=1` |
+| `killTree.ts` | taskkill | no | pid of a live child | inherited | absolute `%SystemRoot%\System32\taskkill.exe`; never after exit; fallback when taskkill fails |
+| `update.ts` | git, npm | Windows only (npm.cmd), fixed args | fixed | smart's install folder | reworked in Phase 19 |
+
+Concrete bug fixed: on Windows, libuv looks up a bare program name in the spawn's working directory before `PATH`, so a `git.exe`,
+`claude.exe` or `taskkill.exe` committed to a cloned repository would run when smart opened it (checkpoint init and the file list run git at
+startup). `src/core/which.ts` resolves programs to absolute paths from absolute PATH entries only.
+
+Intentionally unchanged: verify commands keep cmd.exe's normal lookup (a user's `run-tests.bat` in the project root keeps working); they are
+either the user's own/trusted `verify.commands` or the project's package.json scripts, which run project code by design (documented in README Safety).
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -78,6 +100,8 @@ restarts; `/resume`; usage/limit tracking; dry-run; `/rate` `/good` `/bad`; TUI;
 
 - Phase 2: `src/core/config.ts`, `src/core/store/trust.ts` (new), `src/trust.ts` (new), `src/init.ts`, `src/cli.tsx`, `src/core/pipeline.ts`,
   `smart.config.example.json`, `README.md`, `ROUTING.md`.
+- Phase 3: `src/core/which.ts` (new), `src/core/killTree.ts`, `src/core/claude.ts`, `src/core/claudeProcess.ts`, `src/core/spares.ts`,
+  `src/core/checkpoint.ts`, `src/core/files.ts`, `src/core/verifier.ts`, `src/cli.tsx`.
 
 ## Tests added or changed
 
@@ -86,6 +110,9 @@ restarts; `/resume`; usage/limit tracking; dry-run; `/rate` `/good` `/bad`; TUI;
   `test/core/config.test.ts` (default is `acceptEdits`), `test/core/bugfixes.test.ts` (risky project settings are now ignored, not just warned
   about), `test/core/pipeline.test.ts` (bypass notice needs an explicit bypass config; new default-mode and `/mode bypass` tests).
   Result: 626 passed, 1 skipped.
+- Phase 3: new `test/core/which.test.ts`; `test/core/killTree.test.ts` (absolute taskkill, no kill after exit, fallback when taskkill fails);
+  `test/core/claude.test.ts` (missing claude on Windows, relative PATH ignored, argument boundaries, prompt over stdin with no shell).
+  Result: 637 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

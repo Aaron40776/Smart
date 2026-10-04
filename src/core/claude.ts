@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { killTree } from './killTree.js';
+import { pathDirs } from './which.js';
 import { authError, cancelled, cliMissing, limitError, overloadedError, SmartError } from './errors.js';
 import { emptyUsage, type LimitWindow, type Usage } from './types.js';
 
@@ -290,6 +291,8 @@ export function runClaude(opts: RunClaudeOptions): Promise<ClaudeResult> {
     const command: ClaudeCommand = opts.binary ? { cmd: opts.binary, prefix: [] } : claudeCommand();
     let child: ChildProcess;
     try {
+      // An injected spawn (tests, a pre-started spare) does not look anything up.
+      if (!opts.spawnImpl) assertFound(command);
       child = spawnFn(command.cmd, [...command.prefix, ...buildArgs(opts)], { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: spawnEnv(opts) });
     } catch (e) {
       return reject(toSpawnError(e));
@@ -410,6 +413,16 @@ export interface ClaudeCommand {
   cmd: string;
   /** Arguments that must precede the real ones (e.g. the cli.js path when launching via node). */
   prefix: string[];
+  /**
+   * Windows only: Claude Code was not found on PATH. Starting the bare name would make Windows look in the project folder
+   * first (see which.ts), so callers report it as missing instead of starting anything.
+   */
+  missing?: boolean;
+}
+
+/** Fails like a missing CLI when `command` was not found (Windows), so nothing is started by a bare name. */
+export function assertFound(command: ClaudeCommand): void {
+  if (command.missing) throw cliMissing();
 }
 
 let resolved: { key: string; command: ClaudeCommand } | undefined;
@@ -433,7 +446,8 @@ export function resolveClaudeCommand(
   if (env.SMART_CLAUDE_BIN) return { cmd: env.SMART_CLAUDE_BIN, prefix: [] };
   if (platform !== 'win32') return { cmd: 'claude', prefix: [] };
   const w = path.win32;
-  for (const dir of (env.PATH ?? env.Path ?? '').split(w.delimiter).filter(Boolean)) {
+  // Absolute PATH entries only: `.` or an empty entry would mean the project folder.
+  for (const dir of pathDirs({ platform, env })) {
     const exe = w.join(dir, 'claude.exe');
     if (exists(exe)) return { cmd: exe, prefix: [] };
     if (exists(w.join(dir, 'claude.cmd'))) {
@@ -443,5 +457,5 @@ export function resolveClaudeCommand(
       }
     }
   }
-  return { cmd: 'claude', prefix: [] };
+  return { cmd: 'claude', prefix: [], missing: true };
 }

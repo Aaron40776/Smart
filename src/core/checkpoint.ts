@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmdirSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { programPath } from './which.js';
 
 export interface FileChange {
   path: string;
@@ -50,8 +51,11 @@ const TIMEOUT_MS = 60_000;
 
 function git(args: string[], opts: { cwd: string; env?: Record<string, string>; input?: string; timeoutMs?: number }): Promise<GitResult> {
   return new Promise((resolve) => {
+    // An absolute path on Windows, so a git.exe inside the project is never the one that runs (see which.ts).
+    const bin = programPath('git');
+    if (!bin) return resolve({ code: 127, stdout: '' });
     const child = execFile(
-      'git',
+      bin,
       args,
       { cwd: opts.cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...opts.env }, maxBuffer: 64 * 1024 * 1024, timeout: opts.timeoutMs ?? TIMEOUT_MS, encoding: 'utf8', windowsHide: true },
       (err, stdout) => {
@@ -136,7 +140,7 @@ export class GitCheckpoints implements Checkpointer {
       // T (file <-> symlink type change) is restored like a modification.
       if (path && (status === 'A' || status === 'M' || status === 'D' || status === 'T')) files.push({ path, status: status === 'T' ? 'M' : status });
     }
-    const stat = await git(['diff', '--no-renames', '--no-ext-diff', '--numstat', from, to, ...scope], { cwd: this.root });
+    const stat = await git(['diff', '--no-renames', '--no-ext-diff', '--no-textconv', '--numstat', from, to, ...scope], { cwd: this.root });
     let insertions = 0;
     let deletions = 0;
     if (stat.code === 0) {

@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, InvalidArgumentError } from 'commander';
@@ -143,7 +144,8 @@ async function main() {
   }
 
   const claude = resolveClaudeCommand();
-  if (spawnSync(claude.cmd, [...claude.prefix, '--version'], { stdio: 'ignore' }).error) {
+  // Probed from the home folder: never let a `claude` in the project folder answer for the real one (see core/which.ts).
+  if (claude.missing || spawnSync(claude.cmd, [...claude.prefix, '--version'], { stdio: 'ignore', cwd: homedir(), windowsHide: true }).error) {
     const err = new SmartError('cli_missing', 'The `claude` CLI was not found on your PATH.', 'Install Claude Code (https://docs.claude.com/claude-code), then run `claude` once to log in.');
     return fail(err.message, err.hint);
   }
