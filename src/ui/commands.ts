@@ -64,7 +64,7 @@ export function parseInput(raw: string): Command | null {
       if (arg === '') return { kind: 'mode', mode: 'show' };
       if (arg === 'auto' || arg === 'default') return { kind: 'mode', mode: null };
       const mode = MODES[arg];
-      return mode ? { kind: 'mode', mode } : { kind: 'error', message: `Unknown mode "${rest[0]}". Use bypass, edits, plan or auto.` };
+      return mode ? { kind: 'mode', mode } : { kind: 'error', message: `Unknown mode "${rest[0]}". Use edits, plan, bypass or default.` };
     }
     case 'model': {
       const arg = (rest[0] ?? '').toLowerCase();
@@ -94,7 +94,7 @@ export const COMMANDS: { name: string; help: string }[] = [
   { name: '/resume', help: 'continue a failed or cancelled task' },
   { name: '/good', help: 'the last result was right' },
   { name: '/bad', help: 'the last result was wrong (smart learns)' },
-  { name: '/mode', help: 'bypass | edits | plan | auto' },
+  { name: '/mode', help: 'edits | plan | bypass | default' },
   { name: '/help', help: 'show help' },
   { name: '/quit', help: 'exit' },
 ];
@@ -117,7 +117,7 @@ export const HELP_TEXT = [
   '  /diff             show what the last task changed',
   '  /resume           continue a failed or cancelled task from its first unfinished step',
   '  /good, /bad       rate the last result; /bad makes smart use a stronger model for similar work',
-  '  /mode <m>         permissions: bypass | edits | plan (read-only) | auto',
+  '  /mode <m>         permissions: edits | plan (read-only) | bypass (any command, unasked) | default (the configured one)',
   '  /help, /quit',
   'While a task runs, Enter queues the next task (Esc cancels both); /usage, /cost and /diff work meanwhile.',
   'Keys: Esc cancel · PgUp/PgDn scroll the output · Tab switch panel · ↑/↓ scroll or select · Ctrl+C quit',

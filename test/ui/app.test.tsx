@@ -96,6 +96,20 @@ describe('App', () => {
     await waitFor(() => !lastFrame()!.includes('[mode:plan]'));
   });
 
+  it('makes bypass mode obvious in the header, from config or /mode, and quiet in the default mode', async () => {
+    const quiet = render(<App {...makeApp()} />);
+    await waitFor(() => quiet.lastFrame()!.includes('smart'));
+    expect(quiet.lastFrame()).not.toContain('bypass');
+    const cfg = render(<App {...makeApp({ config: (c) => { c.runner.permissionMode = 'bypassPermissions'; } })} />);
+    await waitFor(() => cfg.lastFrame()!.includes('bypass: runs any command'));
+    const { stdin, lastFrame } = render(<App {...makeApp()} />);
+    await type(stdin, '/mode bypass');
+    await waitFor(() => lastFrame()!.includes('bypass: runs any command'));
+    expect(lastFrame()).toContain('without asking');
+    await type(stdin, '/mode default');
+    await waitFor(() => !lastFrame()!.includes('bypass: runs any command'));
+  });
+
   it('/undo and /diff say so when there is no git repository to work with', async () => {
     const { stdin, lastFrame } = render(<App {...makeApp()} />);
     await type(stdin, '/undo');

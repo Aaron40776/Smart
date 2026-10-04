@@ -19,7 +19,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 13/14 | Routing benchmark, `--rate` diagnostics | done |
 | 15/16 | Learning robustness, cost accounting | done |
 | 17 | CLI, JSON, exit codes | done |
-| 18 | TUI | pending |
+| 18 | TUI | done |
 | 19 | Installer and updater | pending |
 | 20 | CI, package, release hygiene | pending |
 | 21 | Performance | pending |
@@ -281,6 +281,19 @@ Fixes:
 Verified with the built `dist/cli.js` and the fake Claude: unknown option (2, JSON doc), format without `-p` (2), bad config (2, JSON), nothing to
 resume (6, JSON), missing Claude (3, JSON), success (0, stdout is only the JSON document), `--version`/`--help` (0).
 
+## Phase 18: TUI reliability and safety clarity (done)
+
+Audited: cancellation (Esc/Ctrl+C → cancel + settle), queued tasks (start only after success, dropped with a notice otherwise, dropped with
+Esc), failed tasks, plan approval (owns the keyboard; Esc cancels), model and cost display, `/resume`, `/undo` (refused while running), `/diff`,
+errors, terminal resize, shutdown (alt screen and taskbar progress restored). No redesign.
+Changes:
+- Bypass mode was a dim `· bypass`; it is now a yellow `· bypass: runs any command` (from config or `/mode bypass`), `plan` shows `· read-only`,
+  and the default `acceptEdits` shows nothing. `/mode bypass` says what it allows.
+- `/mode auto` meant "back to the configured mode", while Claude Code has a permission mode named `auto`; the documented word is now
+  `/mode default` (`auto` is still accepted).
+- Model text in the output panel is sanitized (Phase 11); one-shot runs return the shared exit codes (Phase 17).
+Checked the built TUI under a pseudo-terminal with the fake Claude: renders, runs a one-shot task, exits 0.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -309,6 +322,7 @@ resume (6, JSON), missing Claude (3, JSON), success (0, stdout is only the JSON 
   `src/core/pipeline/calls.ts`, `src/cli.tsx`, `ROUTING.md`.
 - Phase 17: `src/exitCodes.ts` (new), `src/print.ts`, `src/cli.tsx`, `src/ui/App.tsx`, `src/ui/state.ts`, `src/core/errors.ts` (`resume` kind),
   `src/core/pipeline.ts`, `README.md`.
+- Phase 18: `src/ui/App.tsx`, `src/ui/commands.ts`, `README.md`.
 
 ## Tests added or changed
 
@@ -341,6 +355,7 @@ resume (6, JSON), missing Claude (3, JSON), success (0, stdout is only the JSON 
 - Phase 15/16: new `test/core/learning.test.ts` (8) and `test/core/accounting.test.ts` (2). Result: 733 passed, 1 skipped.
 - Phase 17: new `test/exitCodes.test.ts` (2); `test/print.test.ts` (auth → 3, +4: failure kind and pure-JSON stdout, limit 5 / budget 4,
   nothing to resume 6 with JSON, success fields); `test/ui/app.test.tsx` (one-shot exit codes). Result: 739 passed, 1 skipped.
+- Phase 18: `test/ui/app.test.tsx` (+1 header indicators for bypass/default). Result: 740 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

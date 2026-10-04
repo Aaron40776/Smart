@@ -252,10 +252,10 @@ export function App({ pipeline, bus, tracker, trackerPath, cwd, version, initial
         if (pipeline.isRunning) return dispatch({ type: 'notice', level: 'warn', message: 'A task is already running.' });
         return startResume();
       case 'mode':
-        if (cmd.mode === 'show') return dispatch({ type: 'ui:info', text: `Permission mode: ${pipeline.permissionMode}${mode ? ' (set with /mode)' : ' (from config)'}.` });
+        if (cmd.mode === 'show') return dispatch({ type: 'ui:info', text: `Permission mode: ${pipeline.permissionMode}${mode ? ' (set with /mode; /mode default goes back to the configured one)' : ' (from config)'}.` });
         setMode(cmd.mode);
         pipeline.setPermissionMode(cmd.mode);
-        return dispatch({ type: 'ui:info', text: cmd.mode ? `Permission mode set to ${cmd.mode}${cmd.mode === 'plan' ? ' (read-only: Claude will not edit files).' : '.'}` : `Permission mode back to the configured default (${pipeline.permissionMode}).` });
+        return dispatch({ type: 'ui:info', text: cmd.mode ? `Permission mode set to ${cmd.mode}${cmd.mode === 'plan' ? ' (read-only: Claude will not edit files).' : cmd.mode === 'bypassPermissions' ? ': Claude Code may run any command without asking, for the rest of this session.' : '.'}` : `Permission mode back to the configured one (${pipeline.permissionMode}).` });
       case 'dry':
         setDryRun(!dryRun);
         return dispatch({ type: 'ui:info', text: `Dry-run ${!dryRun ? 'on: tasks will classify and plan only.' : 'off.'}` });
@@ -297,7 +297,10 @@ export function App({ pipeline, bus, tracker, trackerPath, cwd, version, initial
         <Box flexShrink={1}>
           <Text wrap="truncate-end">
             <Text color={ACCENT} bold>✻ smart</Text>
-            <Text dimColor>{` v${version}${size.cols >= 120 ? ` · ${shortPath(cwd)}` : ''}${pipeline.permissionMode === 'bypassPermissions' ? ' · bypass' : ''}`}</Text>
+            <Text dimColor>{` v${version}${size.cols >= 120 ? ` · ${shortPath(cwd)}` : ''}`}</Text>
+            {/* Only the modes that change what happens unasked are shown: bypass in warning colour, plan (read-only) plainly. */}
+            {pipeline.permissionMode === 'bypassPermissions' ? <Text color="yellow" bold>{' · bypass: runs any command'}</Text> : null}
+            {pipeline.permissionMode === 'plan' ? <Text dimColor>{' · read-only'}</Text> : null}
           </Text>
         </Box>
         <Box flexShrink={0} marginLeft={2}>

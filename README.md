@@ -64,7 +64,7 @@ While a task runs you can type the next one: `Enter` queues it and it starts whe
 | `/model haiku\|sonnet\|opus\|auto` | force a model; `/dry` toggles dry-run |
 | `/good` `/bad` | rate the last result; `/bad` teaches smart to use a stronger model or more effort for similar work |
 | `/undo` `/diff` `/resume` | revert or show the last task's file changes (needs git; also after a restart), continue an unfinished task |
-| `/mode bypass\|edits\|plan\|auto` | permission mode (`plan` is read-only) |
+| `/mode edits\|plan\|bypass\|default` | permission mode for this session (`plan` is read-only, `default` returns to your config) |
 | `/new` `/config` `/help` `/quit` | fresh conversation, effective settings, help, exit |
 
 **Plan review** (big builds): `↑↓` select, `Space` skip, `a` add, `d` delete, `J`/`K` move, `m` model, `e`/`i` edit title/instructions (`←→` `Home` `End` `Ctrl+W` while editing), `Enter` run, `Esc` cancel.
@@ -84,7 +84,7 @@ Costs shown are what Claude Code reports. Routing rules and every setting: **[RO
 
 - **Permissions.** Steps run with `acceptEdits` by default: Claude Code edits files, and runs shell commands only where your own Claude Code permission rules
   (`permissions.allow` in its settings) allow them. `smart` still runs your checks itself (see below). To let steps run any command unasked, set
-  `"runner": { "permissionMode": "bypassPermissions" }` in your global config; `smart` then warns at startup and shows `bypass` in the header.
+  `"runner": { "permissionMode": "bypassPermissions" }` in your global config; `smart` then warns at startup and shows `bypass` in yellow in the header.
   `/mode plan` makes a session read-only. Claude Code refuses `bypassPermissions` as root, and `smart` falls back to `acceptEdits`.
 - **Checks run project code.** After a step changes code, `smart` runs the project's `typecheck`, `lint`, `build` and `test` scripts from `package.json`
   (or your `verify.commands`). In a repository you do not trust, set `"verify": { "auto": false }` in your global config.
