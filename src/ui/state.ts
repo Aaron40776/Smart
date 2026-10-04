@@ -1,6 +1,7 @@
 import type { SmartEvent, Stage, StageStatus } from '../core/events.js';
 import type { Classification, Limits, ModelTier, Plan, RouteDecision, Usage } from '../core/types.js';
 import { emptyUsage } from '../core/types.js';
+import { forTerminal } from '../core/text.js';
 import { fmtCost, fmtDuration } from './format.js';
 
 export type StepStatus = 'pending' | 'active' | 'verifying' | 'done' | 'failed' | 'skipped' | 'cancelled';
@@ -55,9 +56,10 @@ export const initialState = (): UiState => ({
   escalatedTo: {}, output: [], session: emptyUsage(), sessionAtTaskStart: emptyUsage(), chatTasks: 0, limits: null, stepStartedAt: {}, stepDuration: {}, nextId: 1,
 });
 
+/** Every line shown goes through here: model text and diffs of your files lose terminal escape sequences (see core/text.ts). */
 const push = (s: UiState, kind: OutputLine['kind'], text: string, stepId?: string): UiState => ({
   ...s,
-  output: [...s.output, { id: s.nextId, kind, text, stepId }].slice(-MAX_OUTPUT),
+  output: [...s.output, { id: s.nextId, kind, text: forTerminal(text), stepId }].slice(-MAX_OUTPUT),
   nextId: s.nextId + 1,
 });
 
@@ -126,8 +128,9 @@ export function reduce(s: UiState, e: UiAction): UiState {
     case 'step:stream': {
       // Grow the live line of this step, or start one.
       const last = s.output.at(-1);
-      if (last?.live && last.stepId === e.stepId) return { ...s, output: [...s.output.slice(0, -1), { ...last, text: last.text + e.text }] };
-      return { ...s, output: [...s.output, { id: s.nextId, kind: 'text' as const, text: e.text, stepId: e.stepId, live: true }].slice(-MAX_OUTPUT), nextId: s.nextId + 1 };
+      const text = forTerminal(e.text);
+      if (last?.live && last.stepId === e.stepId) return { ...s, output: [...s.output.slice(0, -1), { ...last, text: last.text + text }] };
+      return { ...s, output: [...s.output, { id: s.nextId, kind: 'text' as const, text, stepId: e.stepId, live: true }].slice(-MAX_OUTPUT), nextId: s.nextId + 1 };
     }
     case 'step:output': {
       // The complete text replaces what was streamed of it; anything else ends a live line as it stands.

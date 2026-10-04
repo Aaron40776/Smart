@@ -15,7 +15,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 8 | Claude process lifecycle, PID safety | done |
 | 9 | Sessions, rollover, resume | done |
 | 10/12 | Pipeline state, failure classification, verification, review | done |
-| 11 | Planner and context robustness | pending |
+| 11 | Planner and context robustness | done |
 | 13/14 | Routing benchmark, `--rate` diagnostics | pending |
 | 15/16 | Learning robustness, cost accounting | pending |
 | 17 | CLI, JSON, exit codes | pending |
@@ -202,6 +202,22 @@ New data: `StepRecord.failure` (persisted; Phase 15 learning uses it), `TaskSumm
 (Phase 17 maps them to JSON and exit codes). Review stays fail-open when the reviewer is unavailable (reported as skipped); when review is
 skipped/upgraded is unchanged (`shouldReview`, `reviewerTier`) and covered by existing tests.
 
+## Phase 11: planner and execution robustness (done)
+
+`parsePlan` treats planner output as untrusted (schema validity proves nothing): titles/summary/features/acceptance become single clean lines with
+caps (`PLAN_LIMITS`), instructions are capped at 2000 characters, at most 20 files and 5 criteria per step, file references must pass
+`unsafePathReason` (dropped ones are named in the warning), empty and repeated steps are dropped and ids regenerated, fields the planner has no say
+over (`tier`, `model`) are ignored, and a plan with nothing usable left falls back to a single step (existing fallback kept). The classifier's
+reason and answer are cleaned the same way.
+
+Concrete bug fixed: **terminal escape injection**. Model text (replies, plan titles, notices with error output) and file contents (`/diff`) were
+written straight to the terminal; a prompt-injected reply could set the window title, clear or rewrite the screen, or write the clipboard
+(OSC 52). `src/core/text.ts` `forTerminal` strips escape sequences and control characters; it is applied at the TUI reducer's single output
+choke point (complete lines and streamed deltas), to `-p` progress on stderr and to the text reply on stdout (JSON output is escaped by JSON).
+
+Context gathering (Phase 4/5) already covers binary files (NUL sniff), huge files (budget-capped reads), duplicates, nonexistent files, path
+boundaries and secrets; repository size is bounded by the 80/400-file lists and `limits.maxContextBytes`.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -223,6 +239,7 @@ skipped/upgraded is unchanged (`shouldReview`, `reviewerTier`) and covered by ex
 - Phase 9: `src/core/pipeline.ts`, `src/core/store/conversation.ts` (`PendingTask.files`).
 - Phase 10/12: `src/core/pipeline/outcome.ts` (new), `src/core/pipeline.ts`, `src/core/verifier.ts` (exit details, spawn failure),
   `src/core/events.ts` (`task:done.failure`), `src/core/store/tracker.ts` (`FailureKind`).
+- Phase 11: `src/core/planner.ts`, `src/core/text.ts` (new), `src/core/classifier.ts`, `src/ui/state.ts`, `src/print.ts`.
 
 ## Tests added or changed
 
@@ -248,6 +265,8 @@ skipped/upgraded is unchanged (`shouldReview`, `reviewerTier`) and covered by ex
 - Phase 9: `test/core/resume.test.ts` (+6 session/resume scenarios). Result: 694 passed, 1 skipped.
 - Phase 10/12: new `test/core/outcome.test.ts` (11: kind classification, policy, and pipeline runs for missing command, real test failure,
   review failure, Claude Code not starting, timeout, budget (both kinds), limit, cancel, success). Result: 705 passed, 1 skipped.
+- Phase 11: `test/core/planner.test.ts` (+6 untrusted-plan cases), new `test/core/text.test.ts` (4: escape removal, markdown kept, caps, TUI
+  reducer). Result: 715 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

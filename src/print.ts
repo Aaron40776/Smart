@@ -1,6 +1,7 @@
 import type { EventBus, SmartEvent } from './core/events.js';
 import type { Pipeline } from './core/pipeline.js';
 import { formatEstimate } from './core/rating/estimate.js';
+import { forTerminal } from './core/text.js';
 import type { Plan, RouteDecision, Usage } from './core/types.js';
 
 export interface PrintOptions {
@@ -42,7 +43,8 @@ export async function runPrint(pipeline: Pipeline, bus: EventBus, prompt: string
   let classification: string | undefined;
   let errorMessage: string | undefined;
   let changes: { files: number; insertions: number; deletions: number; paths: string[] } | undefined;
-  const log = (s: string) => io.err.write(`smart: ${s}\n`);
+  // Progress and replies contain model text: never let escape sequences in it reach the terminal (see core/text.ts).
+  const log = (s: string) => io.err.write(`smart: ${forTerminal(s)}\n`);
   const startedAt = Date.now();
   let totals: Usage | undefined;
 
@@ -167,7 +169,8 @@ export async function runPrint(pipeline: Pipeline, bus: EventBus, prompt: string
       io.out.write(`Estimated cost: ${formatEstimate(parts)} if every step passes first time\n`);
     }
   } else if (reply) {
-    io.out.write(reply.endsWith('\n') ? reply : `${reply}\n`);
+    const clean = forTerminal(reply);
+    io.out.write(clean.endsWith('\n') ? clean : `${clean}\n`);
   }
   log(`${code === 0 ? 'done' : code === 130 ? 'cancelled' : 'failed'} in ${secs(Date.now() - startedAt)}${cost > 0 ? ` · ${money(cost)}` : ''}${totals ? '' : ''}`);
   return code;
