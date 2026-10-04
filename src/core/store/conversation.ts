@@ -25,6 +25,8 @@ export interface PendingTask {
   plan: Plan;
   /** Ids of the plan steps that already finished. */
   doneStepIds: string[];
+  /** Files the finished steps changed (absent in entries saved by older versions). */
+  files?: string[];
   at: string;
 }
 
@@ -116,6 +118,7 @@ export function validPending(p: unknown): PendingTask | undefined {
   const t = p as Partial<PendingTask> | null | undefined;
   if (!t || typeof t.prompt !== 'string' || !t.plan || !Array.isArray(t.plan.steps) || t.plan.steps.length === 0 || !t.plan.steps.every(isPlanStep)) return undefined;
   if (!t.classification || !COMPLEXITIES.includes(t.classification.complexity) || !isStrings(t.doneStepIds)) return undefined;
+  if (t.files !== undefined && !isStrings(t.files)) return undefined;
   return t as PendingTask;
 }
 

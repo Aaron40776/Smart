@@ -279,6 +279,8 @@ export class Pipeline {
         classification = resumed.classification;
         plan = resumed.plan;
         for (const id of resumed.doneStepIds) doneIds.add(id);
+        // What the finished steps changed: the next step is told, as it would have been in the original run.
+        for (const f of resumed.files ?? []) if (!touched.includes(f)) touched.push(f);
         summary.classification = classification;
         summary.plan = plan;
         for (const st of ['classify', 'plan', 'approve'] as const) stage(st, 'skipped');
@@ -364,9 +366,12 @@ export class Pipeline {
       doneRef.executing = true;
       const active = plan.steps.filter((s) => !s.skipped);
       let failed = false;
+      let first = true;
       for (const [index, step] of active.entries()) {
         if (doneIds.has(step.id)) continue;
-        const rec = await this.runOneStep({ plan, step, index, total: active.length, classification, touched, current: (s) => at(s), prompt, cursor, referenced });
+        // The first step that runs now (not necessarily index 0: /resume starts later) gets what you referenced with @path.
+        const rec = await this.runOneStep({ plan, step, index, total: active.length, classification, touched, current: (s) => at(s), prompt, cursor, referenced, first });
+        first = false;
         summary.steps.push(rec);
         if (rec.outcome === 'done') doneIds.add(step.id);
         if (rec.outcome !== 'done') {
@@ -664,6 +669,8 @@ export class Pipeline {
     cursor: { tree: string | null };
     /** Files the user referenced with @path (given to the first step). */
     referenced: import('./runner.js').FileContext[];
+    /** The first step this run executes (index 0 normally, a later one for /resume). */
+    first: boolean;
   }): Promise<StepRecord> {
     const { plan, step, index, total, classification, touched } = a;
     const stepStart = a.cursor.tree;
@@ -708,15 +715,18 @@ export class Pipeline {
       // One persisted Claude Code session per conversation: steps and follow-up tasks resume it.
       const resuming = this.config.session.resume && this.conv.sessionId !== null;
       const sessionId = this.config.session.resume ? (this.conv.sessionId ?? randomUUID()) : undefined;
-      const memory = !resuming && index === 0 ? renderMemory(this.conv) : '';
-      const note = index === 0 ? this.notes.join(' ') : '';
+      // A new Claude Code session knows nothing: give it the conversation so far, whichever step this is (the first of a task,
+      // the step /resume continues with, any step when sessions are off, or a step whose saved session was lost).
+      const memory = !resuming ? renderMemory(this.conv) : '';
+      // One-off notes (e.g. "the user undid your changes") go to whichever step runs next, once.
+      const note = this.notes.join(' ');
 
       let ok = false;
       let context = 0;
       this.changes.fresh = null; // this attempt may change files before any snapshot sees them
       try {
         const res = await runStep({
-          plan, step, index, total, touchedFiles: touched, failure, memory: memory || undefined, note: note || undefined, referenced: index === 0 ? a.referenced : undefined,
+          plan, step, index, total, touchedFiles: touched, failure, memory: memory || undefined, note: note || undefined, referenced: a.first ? a.referenced : undefined,
           session: sessionId ? { id: sessionId, resume: resuming } : undefined,
           effort,
           maxBudgetUsd: stepBudget(this.config, this.taskUsage.costUsd),
@@ -847,7 +857,7 @@ export class Pipeline {
     if (!summary.dryRun) {
       const unfinished = !f.keepPending && !summary.ok && summary.plan && summary.classification && (f.executing || summary.steps.some((x) => x.outcome !== 'skipped'));
       if (unfinished) {
-        this.conv.pending = { prompt, classification: summary.classification!, plan: summary.plan!, doneStepIds: [...(f.doneIds ?? [])], at: startedAt };
+        this.conv.pending = { prompt, classification: summary.classification!, plan: summary.plan!, doneStepIds: [...(f.doneIds ?? [])], files: f.touched.slice(0, 50), at: startedAt };
       } else if (summary.ok && !f.keepPending) {
         delete this.conv.pending;
       }

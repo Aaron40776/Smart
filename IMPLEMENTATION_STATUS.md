@@ -13,7 +13,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 4/5 | Filesystem, paths, checkpoints, undo | done |
 | 6/7 | Persistence, locking, privacy, schema versions | done |
 | 8 | Claude process lifecycle, PID safety | done |
-| 9 | Sessions, rollover, resume | pending |
+| 9 | Sessions, rollover, resume | done |
 | 10/12 | Pipeline state, failure classification, verification, review | pending |
 | 11 | Planner and context robustness | pending |
 | 13/14 | Routing benchmark, `--rate` diagnostics | pending |
@@ -164,6 +164,22 @@ Tested: start-up failure, start-up timeout, no-output exit, long-but-alive call 
 re-run; next call gets a new process), model switch refused/ignored/cancelled, process replacement waits for exit, keep-alive reuse,
 spares (dead before take, dead after take), serialization, cancellation, idle shutdown (existing).
 
+## Phase 9: session, rollover and resume (done)
+
+Concrete bug fixed: the conversation summary, one-off notes (e.g. "the user undid your changes") and @referenced files were only given to plan step
+**index 0**. `/resume` starts at a later step, so after a restart with the saved session gone, after a session rollover, or with
+`session.resume: false`, the continuing step ran in a fresh session with no context at all; the undo note was not delivered either.
+Now: memory goes to every step that does not resume a session; notes go to the next step that runs (once); @files to the first step this run
+executes. The files earlier steps changed are saved with the pending task (`PendingTask.files`) and restored on `/resume`, so the step is told
+"Files changed in earlier steps" as in the original run.
+
+Verified (tests): restart + lost session → new session with summary; rollover before a resumed step; session lost between two steps of one
+run; cancel during the resumed step keeps it resumable and emits no `task:done`; escalation after rollover (a failed call's session is never
+resumed or reused: a new one with the summary and the failure text). Existing tests cover the normal multi-step task, context limit rollover,
+resume after verification failure / process death (claude error), and resume through the conversation store.
+"A task never appears complete because state was lost": an empty or malformed stored plan is no longer offered for `/resume` (Phase 6/7
+validation), which would otherwise have "finished" with nothing run.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -182,6 +198,7 @@ spares (dead before take, dead after take), serialization, cancellation, idle sh
   `src/core/store/trust.ts`, `src/core/store/limits.ts`, `src/core/claude.ts` (debug log mode).
 - Phase 8: `src/core/claude.ts`, `src/core/claudeProcess.ts`, `src/core/errors.ts`, `src/core/config.ts` (`runner.startupTimeoutSec`),
   `src/core/pipeline/calls.ts`, `smart.config.example.json`, `ROUTING.md`, `test/fixtures/fake-claude-stream.mjs` (`FAKE_DIE_TURN`).
+- Phase 9: `src/core/pipeline.ts`, `src/core/store/conversation.ts` (`PendingTask.files`).
 
 ## Tests added or changed
 
@@ -204,6 +221,7 @@ spares (dead before take, dead after take), serialization, cancellation, idle sh
 - Phase 8: `test/core/claude.test.ts` (+4 start-up timeout / no-output / runaway line), `test/core/claudeProcess.test.ts` (+4: cancel during
   switch, per-session serialization, failed call does not block, mid-message death), `test/core/spares.test.ts` (+2 dead spares).
   Result: 688 passed, 1 skipped.
+- Phase 9: `test/core/resume.test.ts` (+6 session/resume scenarios). Result: 694 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 
