@@ -42,7 +42,11 @@ When they disagree the score leans towards the higher one (a retry and lost time
 The per-complexity settings (`routing.trivial`, `small_edit`, `multi_file`, `large_build`) are **floors**: the rater can go up from them, never below. `routing.optimize` shifts the boundaries: `cost` needs stronger evidence before a bigger rung, `quality` less (by 0.06).
 
 **It learns from your history.** Each step records the rung it was rated at and whether it passed first time. If a rung passed first time in under about 72% of your last-30-days steps in the same score band (after at least 6), the next similar step goes one rung up; after 15 near-perfect steps, one effort level down on the same model. The reason says so (`history: sonnet · medium passed first try in only 4 of 9 similar steps`). No model is called for any of this.
-`/bad` after a task tells it the result was wrong even though its checks passed: its steps then count as misses for their rungs, so similar work leans to a stronger model or more effort. `/good` confirms a result.
+It does not learn from failures that are not the model's: a check that could not run, a budget or usage limit, a cancel, a timed-out check, or attempts
+lost to Claude Code not starting. A step that failed even after escalating to the top model is left out too (a stronger start would not have
+saved it, and an already red test suite looks the same), and one project counts with at most its 10 most recent steps per rung, so a single
+troubled repository cannot raise costs everywhere. Whatever the history says, it moves a choice by one rung at most.
+`/bad` after a task tells it the result was wrong even though its checks passed: it counts as one miss for each rung the task used, so similar work leans to a stronger model or more effort. `/good` confirms a result.
 
 **Cost estimate.** The plan review shows what the plan will likely cost if every step passes first time: per step, the median cost of your own recent
 clean steps on the same model and effort (at least 3; last 60 days), or a rough built-in guess until you have them (marked "rough"). `--dry-run` prints it too.

@@ -17,7 +17,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 10/12 | Pipeline state, failure classification, verification, review | done |
 | 11 | Planner and context robustness | done |
 | 13/14 | Routing benchmark, `--rate` diagnostics | done |
-| 15/16 | Learning robustness, cost accounting | pending |
+| 15/16 | Learning robustness, cost accounting | done |
 | 17 | CLI, JSON, exit codes | pending |
 | 18 | TUI | pending |
 | 19 | Installer and updater | pending |
@@ -243,6 +243,23 @@ statement that confidence is a heuristic, not a probability.
 
 Bug fixed on the way: `applyLimitPressure` / `plannerDownshift` judged window expiry by the wall clock instead of the pipeline's clock.
 
+## Phase 15/16: learning robustness and cost accounting (done)
+
+`buildHistory` (`src/core/rating/learn.ts`) no longer counts as a miss for the rung:
+- steps whose `failure` is not the model's (`environment`, `budget`, `limit`, `cancelled`, `timeout`), and attempts lost to Claude Code not starting
+  (`StepRecord.environmentRetries`, recorded by the pipeline);
+- a step that failed even after escalating to the top of the configured ladder (an unrelated red suite is indistinguishable from it);
+- more than `PROJECT_CAP` (10) recent steps of one project per rung (`TaskRecord.project` = 16-hex hash of the folder key, no path stored;
+  older records without it are not capped);
+- a `/bad` counts once per task and rung, not once per step. `adjustRung` already moves at most one rung; a test pins that even 200 `/bad`
+  tasks move one rung only.
+
+Cost accounting audit: retries, escalations, keep-alive turns (running-total differences), process replacement and rollover (fresh totals),
+and classifier/planner/reviewer calls were checked. Fix: a failed classify/plan/review call's spend was in the task total but not in `overhead`
+(`onErrorUsage(usage, overhead)` now separates them). Test: totals = steps + overhead exactly, across a retry with a failed call and a lean-start
+fallback (two real failed calls, two charges). Estimates stay labelled "≈ … if every step passes first time" and "(rough)"; reported costs come
+from Claude Code.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -267,6 +284,8 @@ Bug fixed on the way: `applyLimitPressure` / `plannerDownshift` judged window ex
 - Phase 11: `src/core/planner.ts`, `src/core/text.ts` (new), `src/core/classifier.ts`, `src/ui/state.ts`, `src/print.ts`.
 - Phase 13/14: `bench/routing/{tasks,sim,run,live}.ts` (new), `package.json` (`bench` script), `tsconfig.json` (includes `bench`), `src/rate.ts`,
   `src/cli.tsx`, `src/core/usage.ts`, `src/core/pipeline/session.ts`, `src/core/pipeline.ts`, `src/core/types.ts` (comment), `ROUTING.md`, `CONTRIBUTING.md`.
+- Phase 15/16: `src/core/rating/learn.ts`, `src/core/store/tracker.ts` (`projectKey`, `environmentRetries`), `src/core/pipeline.ts`,
+  `src/core/pipeline/calls.ts`, `src/cli.tsx`, `ROUTING.md`.
 
 ## Tests added or changed
 
@@ -296,6 +315,7 @@ Bug fixed on the way: `applyLimitPressure` / `plannerDownshift` judged window ex
   reducer). Result: 715 passed, 1 skipped.
 - Phase 13/14: new `test/bench.test.ts` (4); `test/rate.test.ts` (+4: keyword override, confidence wording, limit and warm-cache rules,
   learning note); `test/core/rating-fixes.test.ts` (2 updated for the new output). Result: 723 passed, 1 skipped.
+- Phase 15/16: new `test/core/learning.test.ts` (8) and `test/core/accounting.test.ts` (2). Result: 733 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

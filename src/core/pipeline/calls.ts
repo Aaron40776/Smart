@@ -20,8 +20,8 @@ export const abortableSleep = (ms: number, signal?: AbortSignal): Promise<void> 
 export interface CallHooks {
   /** Account usage windows reported in any call's stream. */
   onLimits: (windows: Record<string, LimitWindow>, status?: string) => void;
-  /** Spend of a call that ended in an error. */
-  onErrorUsage: (usage: Usage) => void;
+  /** Spend of a call that ended in an error; `overhead` for classify, plan and review calls (they have a JSON schema). */
+  onErrorUsage: (usage: Usage, overhead: boolean) => void;
   notice: (message: string) => void;
 }
 
@@ -44,7 +44,7 @@ export function makeRun(run: RunClaudeFn, config: SmartConfig, hooks: CallHooks,
       });
     } catch (e) {
       // A call that errors (max turns, budget, ...) still spent tokens: count them, or the budget cap and the totals undercount.
-      if (e instanceof SmartError && e.usage) hooks.onErrorUsage(e.usage);
+      if (e instanceof SmartError && e.usage) hooks.onErrorUsage(e.usage, o.jsonSchema !== undefined);
       throw e;
     }
   };

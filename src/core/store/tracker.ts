@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
+import { dirKey } from './conversation.js';
 import type { Classification, Usage } from '../types.js';
 import { emptyUsage } from '../types.js';
 import { quarantineCorrupt, withFileLock, writeFileAtomic } from './atomicFile.js';
@@ -26,6 +28,8 @@ export interface StepRecord {
   rated?: { tier: string; effort?: string; score: number };
   /** For a step that did not finish: why (absent in records from before 0.4). */
   failure?: FailureKind;
+  /** Attempts repeated because Claude Code did not start (not the model's doing; learning discounts them). */
+  environmentRetries?: number;
 }
 
 export interface TaskRecord {
@@ -43,6 +47,9 @@ export interface TaskRecord {
   /** Which project the task ran in (a hash of the folder, see learn.ts); absent in records from before 0.4. */
   project?: string;
 }
+
+/** Which project a task ran in, as stored: a short hash of the folder (the same folder spelled differently on Windows gives the same key). */
+export const projectKey = (cwd: string, platform: NodeJS.Platform = process.platform): string => createHash('sha256').update(dirKey(cwd, platform)).digest('hex').slice(0, 16);
 
 export const HISTORY_VERSION = 1;
 /** history.json has only ever been version 1 (see schema.ts). */

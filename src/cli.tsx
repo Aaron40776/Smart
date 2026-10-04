@@ -140,7 +140,7 @@ async function main() {
     if (!task) return fail('give the task to rate: smart --rate "fix the race condition in worker.js"');
     const tracker = new Tracker(expandHome(config.trackerPath));
     const ctx = {
-      history: buildHistory(tracker.load()),
+      history: buildHistory(tracker.load(), Date.now(), { topTier: config.escalation.ladder.at(-1) }),
       limits: new LimitsStore(expandHome(config.limitsPath)).load(),
       conversation: new ConversationStore(expandHome(config.conversationsPath)).load(cwd),
     };

@@ -19,7 +19,7 @@ import { makePlan, singleStepPlan } from './planner.js';
 import { ANSWER_UPGRADE_SCORE, route, routeRole, reviewerTier } from './router.js';
 import { reviewStep } from './review.js';
 import { gatherFiles, runStep } from './runner.js';
-import type { StepRecord, TaskRecord, Tracker } from './store/tracker.js';
+import { projectKey, type StepRecord, type TaskRecord, type Tracker } from './store/tracker.js';
 import { addUsage, emptyUsage, type Classification, type Limits, type ModelTier, type Plan, type PlanStep, type RouteDecision, type Usage } from './types.js';
 import { LimitsStore } from './store/limits.js';
 import { detectChecks, isDocsOnly, runChecks, type Check, type ExecFn } from './verifier.js';
@@ -148,8 +148,10 @@ export class Pipeline {
     });
     this.run = makeRun(deps.run, config, {
       onLimits: (windows, status) => this.limitsWatch.observe(windows, status),
-      onErrorUsage: (usage) => {
+      onErrorUsage: (usage, overhead) => {
         this.taskUsage = addUsage(this.taskUsage, usage);
+        // A failed classify, plan or review call still cost money: it belongs with that overhead, not with the coding steps.
+        if (overhead) this.overhead = addUsage(this.overhead, usage);
         this.bus.emit({ type: 'tokens', usage, sessionTotal: this.sessionTotal });
       },
       notice: (message) => this.bus.emit({ type: 'notice', level: 'warn', message }),
@@ -577,7 +579,7 @@ export class Pipeline {
     try {
       const tasks = this.deps.tracker?.load() ?? [];
       this.costTable = buildCostTable(tasks);
-      return this.deps.tracker ? buildHistory(tasks) : undefined;
+      return this.deps.tracker ? buildHistory(tasks, this.now(), { topTier: this.config.escalation.ladder.at(-1) }) : undefined;
     } catch {
       return undefined; // learning is a bonus: never let it stop a task
     }
@@ -874,8 +876,10 @@ export class Pipeline {
       }
 
       // A failure around the work (Claude Code did not start) is retried as is: no more effort, no bigger model.
-      if (kind === 'environment') environmentFailures += 1;
-      else failuresOnTier += 1;
+      if (kind === 'environment') {
+        environmentFailures += 1;
+        rec.environmentRetries = environmentFailures;
+      } else failuresOnTier += 1;
       // A forced model is a user decision: retry it, but never silently switch to another (see afterFailure).
       const next = afterFailure({ kind, tier, failuresOnTier, environmentFailures, fromCheck, forced: this.forced !== null, config: this.config });
       if (next.action === 'stop' || next.action === 'give_up') {
@@ -930,7 +934,7 @@ export class Pipeline {
     if (this.deps.tracker && summary.totals.costUsd + summary.totals.outputTokens > 0) {
       const record: TaskRecord = {
         id: summary.taskId, startedAt, prompt, classification: summary.classification, overhead,
-        steps: summary.steps, totals: summary.totals, ok: summary.ok,
+        steps: summary.steps, totals: summary.totals, ok: summary.ok, project: projectKey(this.cwd),
       };
       const err = this.deps.tracker.append(record);
       if (!err) this.lastTaskId = { id: summary.taskId, steps: summary.steps };
