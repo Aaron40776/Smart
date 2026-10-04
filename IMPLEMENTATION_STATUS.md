@@ -16,7 +16,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 9 | Sessions, rollover, resume | done |
 | 10/12 | Pipeline state, failure classification, verification, review | done |
 | 11 | Planner and context robustness | done |
-| 13/14 | Routing benchmark, `--rate` diagnostics | pending |
+| 13/14 | Routing benchmark, `--rate` diagnostics | done |
 | 15/16 | Learning robustness, cost accounting | pending |
 | 17 | CLI, JSON, exit codes | pending |
 | 18 | TUI | pending |
@@ -218,6 +218,31 @@ choke point (complete lines and streamed deltas), to `-p` progress on stderr and
 Context gathering (Phase 4/5) already covers binary files (NUL sniff), huge files (budget-capped reads), duplicates, nonexistent files, path
 boundaries and secrets; repository size is bounded by the 80/400-file lists and `limits.maxContextBytes`.
 
+## Phase 13/14: routing benchmark and diagnostics (done)
+
+`bench/routing/` (`npm run bench`, also typechecked and linted; not in the npm package):
+- `tasks.ts`: 18 tasks covering every scenario the task lists, each with a labelled true difficulty per step, the classifier's plausible
+  (sometimes deliberately wrong) label, the planner's step ratings, and whether checks exist; some have fixture files for live runs.
+- `sim.ts`: runs the **real Pipeline** with a stand-in Claude: success iff capability(model, effort) + seeded noise ≥ difficulty, with common
+  random numbers across strategies; written-down token, price, speed and reviewer-catch assumptions. Strategies: smart, always
+  haiku/sonnet/opus, sonnet·high and opus·high pinned. Metrics: success, silent failure, first-try, attempts, escalations, first model/effort,
+  tokens, cost, latency, checks and reviews.
+- `live.ts` (`--live`): runs fixture tasks through the built CLI and real Claude Code (`-p --output-format json --config ...`), optional, never in CI.
+- `test/bench.test.ts`: reproducibility (identical runs for identical seeds), coverage of every category, internal consistency.
+
+Result (20 seeds): smart 98% success at $0.120/task, always-opus 98% at $0.128, always-opus·high 99% at $0.145, always-sonnet 74% at $0.094,
+always-haiku 32%. Decision: **thresholds were not retuned**. The capabilities are my assumptions; fitting the router to them would be circular.
+What the benchmark did surface: (1) a stale comment claiming `hard` single tasks go straight to Opus (they rate Sonnet·high when the request is
+a small edit) — fixed; (2) most of smart's extra cost/time is underrated hard tasks escalating — documented in ROUTING.md as a property of the
+model, to be checked with `--live`.
+
+`smart --rate` now goes through the real router (`route` + `routeWithSession`) instead of the rater alone, so it shows keyword-rule overrides
+(it used to say Sonnet for "fix the race condition" while a run used Opus), the account-limit downshift (from `limits.json`) and the warm-cache
+rule (from this folder's conversation), plus the deciding rule, both change/question routings, score, signals, floor, learning note, and an explicit
+statement that confidence is a heuristic, not a probability.
+
+Bug fixed on the way: `applyLimitPressure` / `plannerDownshift` judged window expiry by the wall clock instead of the pipeline's clock.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -240,6 +265,8 @@ boundaries and secrets; repository size is bounded by the 80/400-file lists and 
 - Phase 10/12: `src/core/pipeline/outcome.ts` (new), `src/core/pipeline.ts`, `src/core/verifier.ts` (exit details, spawn failure),
   `src/core/events.ts` (`task:done.failure`), `src/core/store/tracker.ts` (`FailureKind`).
 - Phase 11: `src/core/planner.ts`, `src/core/text.ts` (new), `src/core/classifier.ts`, `src/ui/state.ts`, `src/print.ts`.
+- Phase 13/14: `bench/routing/{tasks,sim,run,live}.ts` (new), `package.json` (`bench` script), `tsconfig.json` (includes `bench`), `src/rate.ts`,
+  `src/cli.tsx`, `src/core/usage.ts`, `src/core/pipeline/session.ts`, `src/core/pipeline.ts`, `src/core/types.ts` (comment), `ROUTING.md`, `CONTRIBUTING.md`.
 
 ## Tests added or changed
 
@@ -267,6 +294,8 @@ boundaries and secrets; repository size is bounded by the 80/400-file lists and 
   review failure, Claude Code not starting, timeout, budget (both kinds), limit, cancel, success). Result: 705 passed, 1 skipped.
 - Phase 11: `test/core/planner.test.ts` (+6 untrusted-plan cases), new `test/core/text.test.ts` (4: escape removal, markdown kept, caps, TUI
   reducer). Result: 715 passed, 1 skipped.
+- Phase 13/14: new `test/bench.test.ts` (4); `test/rate.test.ts` (+4: keyword override, confidence wording, limit and warm-cache rules,
+  learning note); `test/core/rating-fixes.test.ts` (2 updated for the new output). Result: 723 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

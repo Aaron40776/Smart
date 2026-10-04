@@ -139,7 +139,12 @@ async function main() {
   if (opts.rate) {
     if (!task) return fail('give the task to rate: smart --rate "fix the race condition in worker.js"');
     const tracker = new Tracker(expandHome(config.trackerPath));
-    process.stdout.write(`${describeRating(task, config, buildHistory(tracker.load())).join('\n')}\n`);
+    const ctx = {
+      history: buildHistory(tracker.load()),
+      limits: new LimitsStore(expandHome(config.limitsPath)).load(),
+      conversation: new ConversationStore(expandHome(config.conversationsPath)).load(cwd),
+    };
+    process.stdout.write(`${describeRating(task, config, ctx).join('\n')}\n`);
     process.exit(0);
   }
 

@@ -9,6 +9,7 @@ cd Smart
 npm install
 npm run check      # lint + typecheck + tests + build
 npm run dev        # run from source (needs the `claude` CLI, logged in)
+npm run bench      # simulated routing benchmark (no Claude calls); see ROUTING.md
 ```
 Node.js 22+ is required. smart supports **Windows 10 and 11** only, and CI runs on Windows. A few small non-Windows branches remain in the code
 (process groups, symlinked paths) so the test suite also runs on Linux, which is where automated tooling usually runs; do not build features on them.
@@ -23,6 +24,7 @@ src/core/pipeline/  split out of the pipeline: calls (call wrapper: overload ret
 src/core/store/   files under %USERPROFILE%\.smart: tracker (history), conversation, inputHistory, limits, atomicFile (lock + atomic write)
 src/ui/       Ink components and the state reducer; src/cli.tsx and src/print.ts are the entry points
 test/         mirrors src; test/fixtures/fake-claude.mjs stands in for the CLI
+bench/        the routing benchmark: tasks, the simulation and its assumptions, and the optional live runner
 install.ps1   the Windows installer (CI parses it with Windows PowerShell 5.1 and runs it)
 ```
 

@@ -539,7 +539,7 @@ export class Pipeline {
 
   /** See plannerDownshift. */
   private plannerDownshift(classification: Classification, score: number): ModelTier | null {
-    return plannerDownshift(classification, score, this.limitsWatch.current, this.config);
+    return plannerDownshift(classification, score, this.limitsWatch.current, this.config, this.now());
   }
 
 

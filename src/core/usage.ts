@@ -37,11 +37,11 @@ export function tightest(limits: Limits | null, nowMs = Date.now()): { name: str
  * Limit-aware routing: when the account is close to a usage limit, automatic routing stops picking Opus (which burns
  * the allowance fastest) and uses Sonnet instead. Forced models, your per-step choices and escalations are not touched.
  */
-export function applyLimitPressure(decision: RouteDecision, limits: Limits | null, config: SmartConfig): RouteDecision {
+export function applyLimitPressure(decision: RouteDecision, limits: Limits | null, config: SmartConfig, nowMs: number = Date.now()): RouteDecision {
   const at = config.usage.downshiftAt;
   if (!at || decision.tier !== 'opus') return decision;
   if (decision.source === 'override' || decision.source === 'step') return decision;
-  const t = tightest(limits);
+  const t = tightest(limits, nowMs);
   if (!t || t.window.utilization < at) return decision;
   return {
     ...decision,

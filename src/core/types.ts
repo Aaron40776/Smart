@@ -7,7 +7,7 @@ export interface Classification {
   complexity: Complexity;
   needsPlan: boolean;
   reason: string;
-  /** How much reasoning the task needs, independent of its size. `hard` single tasks go straight to Opus. */
+  /** How much reasoning the task needs, independent of its size. Blended into the rater's score (`hard` adds 0.3 to the classifier's opinion). */
   difficulty?: Difficulty;
   /** A complete answer to a pure question that needs no project files, tools or current information. */
   answer?: string;

@@ -27,6 +27,10 @@ Two things cost money: the model (Opus is about 2× Sonnet per token; measured) 
 | opus · high | 0.80 to 0.92 | very hard |
 | opus · xhigh | above 0.92 | the hardest |
 
+`smart --rate "task"` shows the decision as a real run would make it without the classifier and planner: the model and effort, which rule decided
+(a keyword rule, the rater, a session rule), the score and the signals behind it, the floor, what your history changed, and whether the account-limit
+or warm-cache rule applies in this folder right now.
+
 The score (0 = routine, 1 = hardest) blends three independent opinions:
 
 - **Local signals**, read from the text at no cost: what the work is about (concurrency, security, architecture, algorithms, intermittent bugs, performance, migrations, work across many files: harder; typos, renames, comments, formatting: easier), stack traces, questions that change nothing, how many files, parts and words. Several hard signals count with diminishing weight.
@@ -44,6 +48,20 @@ The per-complexity settings (`routing.trivial`, `small_edit`, `multi_file`, `lar
 clean steps on the same model and effort (at least 3; last 60 days), or a rough built-in guess until you have them (marked "rough"). `--dry-run` prints it too.
 
 **How good is it?** On 30 prompts I labelled while tuning it, 30 land in the expected range; on 20 written beforehand and not tuned on, 18 do (both are in `test/fixtures` and run in the tests). The labels are one person's judgement and the prompts are short, so treat that as a regression net, not proof: run `smart --rate` on your own tasks and adjust `optimize`, the floors and `keywordRules`.
+
+**Benchmark.** `npm run bench` runs a reproducible, simulated benchmark (`bench/routing/`): 18 representative tasks (typo, question, bug fix,
+feature, large build, architecture, security, concurrency, performance, investigation, migration, docs-only, ambiguous, a task that needs escalation,
+one where the checks catch a wrong result, ...) through the real pipeline (classifier handling, rater, escalation, checks, review, cost accounting),
+with a stand-in for Claude Code. It compares smart's routing with always Haiku, always Sonnet, always Opus and pinned-effort baselines on success,
+first-try success, retries, escalations, the model and effort chosen, tokens, cost and time; `--seeds N` repeats it, `--json FILE` saves every run.
+The stand-in follows written-down assumptions (`bench/routing/sim.ts`: how hard a step each model and effort gets right, prices, speed, how often a
+reviewer catches a wrong result), so its numbers show how the routing logic behaves under those assumptions, not how good real models are; thresholds
+are not tuned against it. `npm run bench -- --live` runs the tasks that have fixture files with the built smart and the real Claude Code instead
+(it costs money and varies from run to run). CI runs the simulation only, as tests of its reproducibility and internal consistency.
+
+Under the current assumptions (20 seeds) smart and always-Opus both finish about 98% of tasks, smart at about 6% lower cost; always-Sonnet finishes
+about 74%. Most of smart's extra cost and time sits in hard tasks the classifier underrates (they start on Sonnet and escalate). Treat these as
+properties of the model in `sim.ts`, and check them with `--live` on your own kind of work before drawing conclusions.
 
 After a failed attempt the same model is retried one effort level up (Sonnet stops at high, Opus at xhigh); after escalating to a stronger model, that model's effort for the score plus one.
 
