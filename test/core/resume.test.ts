@@ -136,9 +136,7 @@ describe('resume and sessions: the step that continues is never left without con
 
   it('a resumed step after a session rollover gets the summary too, and the files earlier steps changed', async () => {
     const store = storeIn();
-    let cwd = '';
     const a = setup({ complexities: ['large_build'], store, executor: failSecond(), config: (c) => { once(c); c.session.maxContextTokens = 1000; } });
-    cwd = a.cwd;
     await a.pipeline.runTask('build it', { autoApprove: true });
     const conv = (a.pipeline as unknown as { conv: { contextTokens?: number; pending?: { files?: string[] } } }).conv;
     conv.contextTokens = 5000; // the session grew past session.maxContextTokens
@@ -150,7 +148,6 @@ describe('resume and sessions: the step that continues is never left without con
     expect(resumed.prompt).toContain('Context from earlier in this conversation'); // ...with the summary
     expect(resumed.prompt).toContain('Files changed in earlier steps: src/game.ts');
     expect(a.of('notice').some((n) => /fresh Claude Code session/.test(n.message))).toBe(true);
-    expect(cwd).toBeTruthy();
   });
 
   it('remembers which files the finished steps changed, through a restart', async () => {
@@ -201,7 +198,7 @@ describe('resume and sessions: the step that continues is never left without con
     const t = setup({
       complexities: ['small_edit', 'small_edit'],
       config: (c) => { c.session.maxContextTokens = 10; c.escalation.retriesPerModel = 0; },
-      executor: (call) => {
+      executor: () => {
         n += 1;
         if (n === 2) throw new SmartError('claude', 'step failed');
         return { isError: false, subtype: 'success', text: `r${n}`, structured: undefined, usage: emptyUsage(), sessionId: 's', numTurns: 1 };
