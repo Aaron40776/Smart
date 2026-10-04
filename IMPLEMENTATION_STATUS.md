@@ -20,8 +20,8 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 15/16 | Learning robustness, cost accounting | done |
 | 17 | CLI, JSON, exit codes | done |
 | 18 | TUI | done |
-| 19 | Installer and updater | pending |
-| 20 | CI, package, release hygiene | pending |
+| 19 | Installer and updater | done |
+| 20 | CI, package, release hygiene | done |
 | 21 | Performance | pending |
 | 22 | Documentation | pending |
 | 24/25 | Final audit and validation | pending |
@@ -294,6 +294,39 @@ Changes:
 - Model text in the output panel is sanitized (Phase 11); one-shot runs return the shared exit codes (Phase 17).
 Checked the built TUI under a pseudo-terminal with the fake Claude: renders, runs a one-shot task, exits 0.
 
+## Phase 19: installer and updater (done)
+
+Concrete bugs fixed: both `smart update` and `install.ps1` ran `git checkout -- package-lock.json` before pulling, silently discarding any local
+change to the lockfile; the updater test asserted that behaviour. Neither ever runs a destructive git command now (no checkout --, reset --hard, clean).
+
+`src/update.ts` (`smart update [--stash]`): tracked local changes → stop and list them (a lockfile-only change gets its own explanation with the
+manual command), `--stash` sets them aside with a named `git stash`; untracked files are left alone; pinned (detached) installs are left alone;
+no upstream → explained; `git fetch` first, then ahead/behind: diverged → explained and untouched, local commits kept; `git merge --ff-only` only;
+the previous commit is recorded and, if `npm ci` or the build fails after the code moved, the message gives `git reset --keep <old>` (safe:
+refuses to lose local changes) plus the rebuild commands. `npm ci --ignore-scripts`.
+
+`install.ps1`: only updates a clone whose `origin` is the expected repository (`SMART_REPO`, normalised https/ssh/.git/case); refuses a folder
+with local changes (lists them) or a non-empty non-smart folder; fast-forward only; pinned installs left alone; new options `SMART_REF`
+(tag/branch/commit, pins) and `SMART_COMMIT` (full commit id; stops before any code from the checkout runs if it differs); `npm ci --ignore-scripts`
+(the only dependency with an install script is esbuild, whose build works without it; checked here, and Windows CI runs the real install).
+Documented the read-before-run option.
+
+Verified: `test/update.test.ts` runs 10 scenarios against real git repositories (fake npm). The installer was parse-checked and run here with
+PowerShell 7.4 on Linux and a stand-in `npm.cmd`: fresh install, clean re-run, dirty folder (refused, edit kept), `SMART_COMMIT` mismatch
+(stopped before npm), wrong origin (refused), pin to a tag, re-run of a pinned install (left alone), npm failure. CI still parses it with
+Windows PowerShell 5.1 (PS 5.1 itself is not available here).
+
+## Phase 20: CI, dependencies, package and release hygiene (done)
+
+- CI: `permissions: contents: read`, `concurrency` (cancel superseded runs); the install test now installs **this commit** (`SMART_REPO` = the
+  checkout, `SMART_COMMIT` = `github.sha`; it used to install whatever was on `main`); a new step proves the installer refuses a folder with local
+  changes and keeps the edit; a package-contents check (`scripts/check-pack.mjs`: exactly dist/cli.js(+map), the docs, LICENSE, package.json, the
+  example config). Normal CI never calls Claude (the benchmark runs simulated, as tests).
+- `npm audit`: 0 vulnerabilities. Lockfile is consistent (`npm ci` passes). Dependabot already covers npm and GitHub Actions weekly. No dependency added.
+- Not changed: actions are pinned by major version tag, not commit SHA (Dependabot updates them; SHA-pinning would need SHAs verified against
+  GitHub, which this session cannot do reliably). There are no release tags in the repository yet; `SMART_REF` works with any ref, and tagging
+  releases is a maintainer step (documented as a recommendation, not done: it is an outward action nobody asked for).
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -323,6 +356,7 @@ Checked the built TUI under a pseudo-terminal with the fake Claude: renders, run
 - Phase 17: `src/exitCodes.ts` (new), `src/print.ts`, `src/cli.tsx`, `src/ui/App.tsx`, `src/ui/state.ts`, `src/core/errors.ts` (`resume` kind),
   `src/core/pipeline.ts`, `README.md`.
 - Phase 18: `src/ui/App.tsx`, `src/ui/commands.ts`, `README.md`.
+- Phase 19/20: `src/update.ts`, `src/cli.tsx`, `install.ps1`, `.github/workflows/ci.yml`, `scripts/check-pack.mjs` (new), `README.md`.
 
 ## Tests added or changed
 
@@ -356,6 +390,8 @@ Checked the built TUI under a pseudo-terminal with the fake Claude: renders, run
 - Phase 17: new `test/exitCodes.test.ts` (2); `test/print.test.ts` (auth → 3, +4: failure kind and pure-JSON stdout, limit 5 / budget 4,
   nothing to resume 6 with JSON, success fields); `test/ui/app.test.tsx` (one-shot exit codes). Result: 739 passed, 1 skipped.
 - Phase 18: `test/ui/app.test.tsx` (+1 header indicators for bypass/default). Result: 740 passed, 1 skipped.
+- Phase 19: new `test/update.test.ts` (10 real-git scenarios); the old `smart update` tests in `test/batch1.test.tsx` asserted the destructive
+  lockfile checkout and were replaced (not weakened: every behaviour they covered is covered again). Result: 747 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

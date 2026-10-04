@@ -16,8 +16,17 @@ For **Windows 10 and 11**. Needs [Git](https://git-scm.com/download/win), Node.j
 irm https://raw.githubusercontent.com/Aaron40776/Smart/main/install.ps1 | iex
 ```
 
-That clones smart into `%USERPROFILE%\Smart` (`$env:SMART_DIR` picks another folder), builds it and puts `smart` on your `PATH`. **Update** any time with `smart update`.
-By hand instead: `git clone https://github.com/Aaron40776/Smart.git`, then in `Smart` run `npm ci`, `npm run build` and `npm link`.
+That clones smart into `%USERPROFILE%\Smart` (`$env:SMART_DIR` picks another folder), installs its dependencies with `npm ci --ignore-scripts` (exactly
+the versions in `package-lock.json`, integrity-checked by npm, with no package install scripts run), builds it and puts `smart` on your `PATH`.
+
+- **Read it first**: `irm https://raw.githubusercontent.com/Aaron40776/Smart/main/install.ps1 -OutFile install.ps1`, read `install.ps1`, then run `.\install.ps1`.
+- **Pin a version**: `$env:SMART_REF = "<tag, branch or commit>"` installs that instead of the latest `main`; a pinned installation is left alone by `smart update`.
+  `$env:SMART_COMMIT = "<full commit id>"` makes the installer stop before running anything unless the code is exactly that commit.
+- **Your changes are safe**: the installer and `smart update` never discard local changes in that folder. They stop and list them; `smart update --stash` sets
+  them aside with `git stash` (`git stash pop` brings them back). Local commits are kept (updates only fast-forward); a clone of another repository is left alone.
+  If installing or building fails after the code moved, `smart update` says which commit you were on and how to return to it.
+
+**Update** any time with `smart update`. By hand instead: `git clone https://github.com/Aaron40776/Smart.git`, then in `Smart` run `npm ci --ignore-scripts`, `npm run build` and `npm link`.
 If scripts are blocked, run `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` once.
 If `claude` is not found, set its full path: `$env:SMART_CLAUDE_BIN = "C:\path\to\claude.exe"`.
 
@@ -33,7 +42,7 @@ smart --model haiku "fix the typo" # force a tier      (--no-plan skips planning
 smart -p "fix the typo" | cat      # headless (--print): reply on stdout, progress on stderr (--output-format json for scripts, --verbose for tool calls)
 smart --rate "fix the race in worker.js"  # show which model and effort it would pick, and why (calls no model)
 smart --no-review "..."            # skip the acceptance review     (--config ./my.json uses another config file)
-smart update                       # get the latest version (git pull, install, build)
+smart update                       # get the latest version (fast-forward, install, build; --stash sets your local changes aside)
 smart init                         # write a starter smart.config.json (--global: %USERPROFILE%\.smart, for all projects)
 smart trust                        # allow this project's smart.config.json to run commands / loosen settings (--remove)
 ```

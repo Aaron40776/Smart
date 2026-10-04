@@ -90,7 +90,10 @@ async function main() {
   const argv = process.argv.slice(2);
   // `smart update` pulls the latest version into the folder smart was cloned to and rebuilds it. Like `init`, only as the
   // whole command line, so a task that starts with the word ("update the readme") still runs as a task.
-  if (argv.length === 1 && argv[0] === 'update') process.exit(updateSmart(fileURLToPath(new URL('..', import.meta.url))));
+  // `--stash` sets your local changes in that folder aside with git stash instead of stopping (see update.ts).
+  if (argv[0] === 'update' && (argv.length === 1 || (argv.length === 2 && argv[1] === '--stash'))) {
+    process.exit(updateSmart(fileURLToPath(new URL('..', import.meta.url)), { stash: argv[1] === '--stash' }));
+  }
 
   // `smart init [--global] [--force]` writes a starter config. Only when it is the whole command line, so a task
   // that merely starts with the word "init" (`smart init the repo`) still runs as a task.
