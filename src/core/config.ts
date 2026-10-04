@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { SmartError } from './errors.js';
+import { TrustStore, trustStorePath, type TrustCheck } from './store/trust.js';
 import { EFFORTS } from './types.js';
 
 const tier = z.enum(['haiku', 'sonnet', 'opus']);
@@ -17,10 +18,27 @@ const validRegex = (s: string): boolean => {
   }
 };
 
+/**
+ * A model name is passed to `claude --model <name>` as its own argument. Aliases (`sonnet`), full ids (`claude-opus-4-1`),
+ * context suffixes (`claude-sonnet-4-5[1m]`) and provider ids (`us.anthropic.…`, Bedrock ARNs) fit; a value starting with `-`
+ * (which a CLI parser could read as another flag) or holding spaces or control characters does not.
+ */
+const modelName = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]*$/, 'not a model name (letters, digits and . _ : @ / [ ] -, not starting with -)');
+
+/** Permission modes, least permissive first. A project file may tighten the mode, never loosen it (see gateProjectConfig). */
+export const PERMISSION_MODES = ['plan', 'dontAsk', 'manual', 'acceptEdits', 'auto', 'bypassPermissions'] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+const PERMISSION_RANK: Record<PermissionMode, number> = { plan: 0, dontAsk: 1, manual: 1, acceptEdits: 2, auto: 3, bypassPermissions: 4 };
+export const permissionRank = (mode: string): number => PERMISSION_RANK[mode as PermissionMode] ?? PERMISSION_RANK.bypassPermissions;
+
 const ConfigSchema = z.object({
   // Each field has its own default, so overriding one model (`{"models":{"opus":"claude-opus-4-1"}}`) is valid.
   models: z
-    .object({ haiku: z.string().min(1).default('haiku'), sonnet: z.string().min(1).default('sonnet'), opus: z.string().min(1).default('opus') })
+    .object({ haiku: modelName.default('haiku'), sonnet: modelName.default('sonnet'), opus: modelName.default('opus') })
     .prefault({}),
   routing: z
     .object({
@@ -78,9 +96,11 @@ const ConfigSchema = z.object({
     .prefault({}),
   runner: z
     .object({
-      permissionMode: z
-        .enum(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'])
-        .default('bypassPermissions'),
+      /**
+       * How much Claude Code may do without asking. `acceptEdits` (default): edit files; other tools (shell commands) only
+       * where your Claude Code permission rules allow them. `bypassPermissions`: anything, unasked; choose it on purpose.
+       */
+      permissionMode: z.enum(PERMISSION_MODES).default('acceptEdits'),
       bare: z.boolean().default(false),
       /** Classify, plan and review calls have no tools, so they skip hooks, plugins and MCP servers (faster start-up). */
       leanCalls: z.boolean().default(true),
@@ -133,8 +153,10 @@ export interface LoadedConfig {
   source: string | null;
   /** Every file that was read, lowest priority first: your global config, then the project's (or `--config`). */
   sources: string[];
-  /** Things worth telling the user: unknown (probably misspelled) keys, and risky settings in a project-local file. */
+  /** Things worth telling the user: unknown (probably misspelled) keys, and settings ignored from an untrusted project file. */
   warnings: string[];
+  /** Informational: settings from a trusted project file that loosen your own config. */
+  notices: string[];
 }
 
 /** Settings that used to exist: still accepted silently so old config files do not warn. */
@@ -160,14 +182,6 @@ function unknownKeys(raw: unknown): string[] {
   return out;
 }
 
-/** A project-local config runs with your permissions: say so when it sets anything that executes commands or passes flags to Claude. */
-function riskyProjectSettings(config: SmartConfig): string[] {
-  const out: string[] = [];
-  if (config.verify.commands.length) out.push(`verify.commands (runs: ${config.verify.commands.join('; ')})`);
-  if (config.runner.extraArgs.length) out.push(`runner.extraArgs (${config.runner.extraArgs.join(' ')})`);
-  return out;
-}
-
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** `over` on top of `base`: objects merge key by key, anything else (values, arrays, null) replaces. */
@@ -178,10 +192,12 @@ export function mergeConfig(base: unknown, over: unknown): unknown {
   return out;
 }
 
-function readConfigFile(path: string): unknown {
+function readConfigFile(path: string): { raw: unknown; text: string } {
   let raw: unknown;
+  let text: string;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
+    text = readFileSync(path, 'utf8');
+    raw = JSON.parse(text);
   } catch (e) {
     throw new SmartError('config', `Could not parse ${path}: ${(e as Error).message}`);
   }
@@ -191,31 +207,134 @@ function readConfigFile(path: string): unknown {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
     throw new SmartError('config', `Invalid config in ${path}: ${issues}`);
   }
-  return raw;
+  return { raw, text };
+}
+
+/**
+ * Settings that cross a trust boundary: they run commands, pass flags to Claude Code, widen what it may do unasked, move where
+ * smart writes your data, or lift a spending cap. `loosens(project, base)` says whether the project's value is less safe than
+ * the one from your own config (or the default).
+ */
+interface Sensitive {
+  path: [string, string] | [string];
+  /** What the setting would do, for the warning. */
+  risk: (value: unknown) => string;
+  loosens: (project: unknown, base: unknown) => boolean;
+}
+
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+const differs = (project: unknown, base: unknown): boolean => !same(project, base);
+const list = (v: unknown): string => (Array.isArray(v) ? v.map(String).join(' ') : String(v));
+/** A cap is lifted when the project removes it or raises it. */
+const liftsCap = (project: unknown, base: unknown): boolean => typeof base === 'number' && (project === null || (typeof project === 'number' && project > base));
+
+const SENSITIVE: Sensitive[] = [
+  { path: ['verify', 'commands'], risk: (v) => `runs shell commands: ${(v as string[]).join('; ')}`, loosens: (p, b) => Array.isArray(p) && p.length > 0 && differs(p, b) },
+  { path: ['verify', 'auto'], risk: () => 'runs the project\'s package.json scripts after each step', loosens: (p, b) => p === true && b === false },
+  { path: ['runner', 'permissionMode'], risk: (v) => `lets Claude Code act with ${String(v)}`, loosens: (p, b) => typeof p === 'string' && permissionRank(p) > permissionRank(String(b)) },
+  { path: ['runner', 'extraArgs'], risk: (v) => `passes extra flags to Claude Code: ${list(v)}`, loosens: (p, b) => Array.isArray(p) && p.length > 0 && differs(p, b) },
+  { path: ['runner', 'bare'], risk: () => 'starts Claude Code with --bare (skips your hooks and settings)', loosens: (p, b) => p === true && b !== true },
+  { path: ['limits', 'maxBudgetUsdPerTask'], risk: (v) => `lifts your task budget (to ${v === null ? 'none' : `$${String(v)}`})`, loosens: liftsCap },
+  { path: ['limits', 'maxBudgetUsdPerStep'], risk: (v) => `lifts your step budget (to ${v === null ? 'none' : `$${String(v)}`})`, loosens: liftsCap },
+  ...(['trackerPath', 'conversationsPath', 'limitsPath', 'historyPath'] as const).map((k): Sensitive => ({
+    path: [k], risk: (v) => `writes your prompts and history to ${String(v)}`, loosens: (p, b) => typeof p === 'string' && expandHome(p) !== expandHome(String(b)),
+  })),
+];
+
+const getAt = (obj: unknown, path: readonly string[]): unknown => path.reduce<unknown>((o, k) => (isPlainObject(o) ? o[k] : undefined), obj);
+const hasAt = (obj: unknown, path: readonly string[]): boolean => {
+  const parent = getAt(obj, path.slice(0, -1));
+  return isPlainObject(parent) && Object.hasOwn(parent, path.at(-1)!);
+};
+
+/** A deep copy of `raw` without the setting at `path`. */
+function withoutAt(raw: unknown, path: readonly string[]): unknown {
+  if (!isPlainObject(raw)) return raw;
+  const [head, ...rest] = path;
+  const out = { ...raw };
+  if (rest.length === 0) delete out[head!];
+  else out[head!] = withoutAt(out[head!], rest);
+  return out;
+}
+
+/**
+ * The trust boundary for a project's own `smart.config.json`. It came with the repository, so a stranger may have written it:
+ * settings in it that would loosen what your own config (or the default) allows are applied only when you trusted the file
+ * (`smart trust`). Everything else in it (routing, models, limits that are stricter, ...) always applies.
+ * Returns the project config with the loosening settings removed (unless trusted) and a description of each one.
+ */
+export function gateProjectConfig(raw: unknown, base: SmartConfig, trusted: boolean): { raw: unknown; loosened: string[] } {
+  let out = raw;
+  const loosened: string[] = [];
+  for (const s of SENSITIVE) {
+    if (!hasAt(raw, s.path)) continue;
+    const value = getAt(raw, s.path);
+    if (!s.loosens(value, getAt(base, s.path))) continue;
+    loosened.push(`${s.path.join('.')} (${s.risk(value)})`);
+    if (!trusted) out = withoutAt(out, s.path);
+  }
+  return { raw: out, loosened };
+}
+
+export interface LoadConfigOptions {
+  /** Where the global config and the trust store live (tests use a temporary home). */
+  home?: string;
+  /** Which project configs you have trusted; defaults to `~/.smart/trusted-projects.json`. */
+  trust?: TrustCheck;
 }
 
 /**
  * Your global `~/.smart/smart.config.json`, then the project's `./smart.config.json` (or `--config <path>`) on top: a
  * project file changes only the keys it sets, the rest of your own settings still apply.
+ *
+ * Trust: your global file and a file you name with `--config` are yours. A `smart.config.json` found in the directory is the
+ * repository's, so its settings that run commands, loosen permissions, pass flags, move your data or lift budgets are ignored
+ * (with a warning) until you trust it with `smart trust` (see gateProjectConfig).
  */
-export function loadConfig(cwd: string, explicitPath?: string, home: string = homedir()): LoadedConfig {
+export function loadConfig(cwd: string, explicitPath?: string, homeOrOptions: string | LoadConfigOptions = homedir()): LoadedConfig {
+  const o: LoadConfigOptions = typeof homeOrOptions === 'string' ? { home: homeOrOptions } : homeOrOptions;
+  const home = o.home ?? homedir();
+  const global = globalConfigPath(home);
   const project = explicitPath ? resolve(cwd, explicitPath) : join(cwd, 'smart.config.json');
   if (explicitPath && !existsSync(project)) throw new SmartError('config', `Config file not found: ${explicitPath}`);
-  const sources = [...new Set([globalConfigPath(home), project])].filter((p) => existsSync(p));
-  if (sources.length === 0) return { config: defaultConfig(), source: null, sources: [], warnings: [] };
+  const sources = [...new Set([global, project])].filter((p) => existsSync(p));
+  if (sources.length === 0) return { config: defaultConfig(), source: null, sources: [], warnings: [], notices: [] };
 
   const warnings: string[] = [];
+  const notices: string[] = [];
   let merged: unknown = {};
   for (const path of sources) {
-    const raw = readConfigFile(path);
+    const { raw, text } = readConfigFile(path);
     const unknown = unknownKeys(raw);
     if (unknown.length) warnings.push(`${path}: ignoring unknown setting${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')} (a typo?)`);
-    // A config that came with the repository runs with your permissions: say so when it runs commands or passes flags.
-    if (path === project && !explicitPath && path !== globalConfigPath(home)) {
-      const risky = riskyProjectSettings(ConfigSchema.parse(raw));
-      if (risky.length) warnings.push(`This directory's smart.config.json sets ${risky.join(' and ')}. Only run smart here if you trust this project.`);
+    let layer = raw;
+    // The repository's own file (found in the directory, not named by you): gate what crosses the trust boundary.
+    if (path === project && !explicitPath && path !== global) {
+      const trust = o.trust ?? new TrustStore(trustStorePath(home));
+      const trusted = trust.isTrusted(cwd, text);
+      const gated = gateProjectConfig(raw, ConfigSchema.parse(merged), trusted);
+      layer = gated.raw;
+      if (gated.loosened.length && trusted) {
+        notices.push(`Using settings from this project's smart.config.json that you trusted: ${gated.loosened.join('; ')}.`);
+      } else if (gated.loosened.length) {
+        const changed = trust.changedSince(cwd, text) ? ' It changed since you last trusted it.' : '';
+        warnings.push(
+          `Ignored settings in ${path} because this project is not trusted:${changed} ${gated.loosened.join('; ')}. ` +
+            'Read the file; if you agree, run `smart trust` here to allow them (or pass it with --config).',
+        );
+      }
     }
-    merged = mergeConfig(merged, raw);
+    merged = mergeConfig(merged, layer);
   }
-  return { config: ConfigSchema.parse(merged), source: sources.at(-1) ?? null, sources, warnings };
+  return { config: ConfigSchema.parse(merged), source: sources.at(-1) ?? null, sources, warnings, notices };
+}
+
+/** The project's `smart.config.json`, validated, with the settings that `smart trust` would allow. */
+export function describeProjectTrust(cwd: string, home: string = homedir()): { path: string; text: string; loosened: string[] } {
+  const path = join(cwd, 'smart.config.json');
+  if (!existsSync(path)) throw new SmartError('config', `There is no smart.config.json in ${cwd} to trust.`);
+  const { raw, text } = readConfigFile(path);
+  const globalPath = globalConfigPath(home);
+  const base = existsSync(globalPath) && globalPath !== path ? ConfigSchema.parse(readConfigFile(globalPath).raw) : defaultConfig();
+  return { path, text, loosened: gateProjectConfig(raw, base, true).loosened };
 }

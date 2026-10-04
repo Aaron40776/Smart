@@ -14,7 +14,7 @@
   "escalation": { "retriesPerModel": 1, "ladder": ["haiku", "sonnet", "opus"] },
   "limits": { "maxPlanSteps": 6, "maxContextBytes": 40000, "maxBudgetUsdPerStep": null, "maxBudgetUsdPerTask": null },
   "session": { "resume": true, "cacheTtlSec": 300, "keepWarmTier": true, "maxContextTokens": 80000 },
-  "runner": { "permissionMode": "bypassPermissions", "bare": false, "leanCalls": true, "keepAlive": true, "autoEffort": true, "extraArgs": [], "effort": {} },
+  "runner": { "permissionMode": "acceptEdits", "bare": false, "leanCalls": true, "keepAlive": true, "autoEffort": true, "extraArgs": [], "effort": {} },
   "review": { "enabled": true },
   "usage": { "downshiftAt": 0.9, "warnAt": 0.8 },
   "verify": { "auto": true, "commands": [], "timeoutSec": 300, "testEveryStep": false },

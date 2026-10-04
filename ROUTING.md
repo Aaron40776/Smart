@@ -165,5 +165,26 @@ stays available for `/resume`.
 
 ## Permissions
 
-`runner.permissionMode` defaults to `bypassPermissions`, so steps can run commands such as `npm install`. Claude Code refuses that mode when run as root
-(common in Docker and CI), so `smart` falls back to `acceptEdits` and tells you. Use `"acceptEdits"` if you do not want commands to run unprompted.
+`runner.permissionMode` defaults to `acceptEdits`: steps edit files, and run shell commands only where your Claude Code permission rules allow them
+(for example `"permissions": { "allow": ["Bash(npm test:*)"] }` in Claude Code's settings). `smart`'s own checks (above) do not depend on it.
+`bypassPermissions` lets steps run any command unasked (installing packages, starting servers); set it on purpose in your global config, for projects you trust.
+Claude Code refuses that mode when run as root (common in Docker and CI), so `smart` falls back to `acceptEdits` and tells you. `plan` is read-only.
+
+## Project config and trust
+
+Your global `%USERPROFILE%\.smart\smart.config.json` and a file you pass with `--config` are yours. A `smart.config.json` that `smart` finds in the
+directory came with the repository, so settings in it that cross a trust boundary are ignored (with a warning naming each one) until you trust it:
+
+| setting | ignored from an untrusted project file when it |
+| --- | --- |
+| `verify.commands` | sets commands (they run in a shell) |
+| `verify.auto` | turns automatic checks on when your config turned them off |
+| `runner.permissionMode` | is more permissive than your own (`plan` < `dontAsk` < `acceptEdits` < `auto` < `bypassPermissions`) |
+| `runner.extraArgs` | passes flags to Claude Code |
+| `runner.bare` | turns on `--bare` (which skips your Claude Code hooks and settings) |
+| `limits.maxBudgetUsdPerTask`, `limits.maxBudgetUsdPerStep` | removes or raises a cap you set |
+| `trackerPath`, `conversationsPath`, `limitsPath`, `historyPath` | moves where your prompts and history are written |
+
+Tightening is always allowed (a project may choose `plan` or a lower budget). `smart trust` records the file's SHA-256 in
+`%USERPROFILE%\.smart\trusted-projects.json`; any change to the file makes it untrusted again. `smart trust --remove` forgets it.
+Model names are checked everywhere: a value that starts with `-` or holds spaces is rejected, so it cannot be read as another Claude Code flag.

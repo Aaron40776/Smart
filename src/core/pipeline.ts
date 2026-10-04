@@ -151,6 +151,9 @@ export class Pipeline {
   /** Change the permission mode for the rest of this session (`null` returns to the configured one). */
   setPermissionMode(mode: string | null): void {
     this.permOverride = mode;
+    if (this.permissionMode === 'bypassPermissions') {
+      this.bus.emit({ type: 'notice', level: 'warn', message: `Permissions are bypassed from now on: Claude Code can run any command in ${this.cwd} without asking.` });
+    }
   }
   get permissionMode(): string {
     return this.permOverride ?? this.config.runner.permissionMode;
@@ -481,7 +484,7 @@ export class Pipeline {
     const perm = resolvePermissionMode(this.config.runner.permissionMode, this.deps.uid ?? process.getuid?.());
     if (perm.warning) this.bus.emit({ type: 'notice', level: 'warn', message: perm.warning });
     else if (perm.mode === 'bypassPermissions') {
-      this.bus.emit({ type: 'notice', level: 'warn', message: `Permissions are bypassed: Claude Code can run any command in ${this.cwd}.` });
+      this.bus.emit({ type: 'notice', level: 'warn', message: `Permissions are bypassed (runner.permissionMode): Claude Code can run any command in ${this.cwd} without asking.` });
     }
   }
 

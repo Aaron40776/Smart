@@ -35,6 +35,7 @@ smart --rate "fix the race in worker.js"  # show which model and effort it would
 smart --no-review "..."            # skip the acceptance review     (--config ./my.json uses another config file)
 smart update                       # get the latest version (git pull, install, build)
 smart init                         # write a starter smart.config.json (--global: %USERPROFILE%\.smart, for all projects)
+smart trust                        # allow this project's smart.config.json to run commands / loosen settings (--remove)
 ```
 
 In the app: `Enter` sends, `Esc` cancels, `Tab` switches panel, `@path` adds a file and `@folder/` its file list (Tab completes), `\`+`Enter` starts a new line, `↑` recalls earlier prompts.
@@ -65,9 +66,17 @@ Costs shown are what Claude Code reports. Routing rules and every setting: **[RO
 
 ## Safety
 
-Steps run with `bypassPermissions` by default so they can install packages and run commands (`smart` says so at startup; Claude Code refuses it as root and `smart` falls back to `acceptEdits`).
-Set `"runner": { "permissionMode": "acceptEdits" }` to be stricter. Run it in a directory you trust, ideally a git repo: `/undo` needs one.
-A `smart.config.json` that comes with a repo can run commands (`verify.commands`), so `smart` warns when a project config sets them.
+- **Permissions.** Steps run with `acceptEdits` by default: Claude Code edits files, and runs shell commands only where your own Claude Code permission rules
+  (`permissions.allow` in its settings) allow them. `smart` still runs your checks itself (see below). To let steps run any command unasked, set
+  `"runner": { "permissionMode": "bypassPermissions" }` in your global config; `smart` then warns at startup and shows `bypass` in the header.
+  `/mode plan` makes a session read-only. Claude Code refuses `bypassPermissions` as root, and `smart` falls back to `acceptEdits`.
+- **Checks run project code.** After a step changes code, `smart` runs the project's `typecheck`, `lint`, `build` and `test` scripts from `package.json`
+  (or your `verify.commands`). In a repository you do not trust, set `"verify": { "auto": false }` in your global config.
+- **A project's `smart.config.json` is not trusted automatically.** Settings in it that would run commands (`verify.commands`), loosen permissions
+  (`runner.permissionMode`, `runner.bare`), pass flags to Claude Code (`runner.extraArgs`), move your history files (`trackerPath`, ...) or lift your budget
+  caps are ignored, with a warning, until you read the file and run `smart trust` in that directory. Trust covers the file's exact contents: if it
+  changes (a pull, another branch), those settings are ignored again. `smart trust --remove` withdraws it. A file you name with `--config` is yours and always applies.
+- **Undo.** Run it in a git repository: `/undo` needs one. Details in [ROUTING.md](ROUTING.md#undo-and-safety-net).
 
 ## Development
 

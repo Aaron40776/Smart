@@ -17,6 +17,7 @@ import { Pipeline } from './core/pipeline.js';
 import { isTier } from './core/router.js';
 import { buildHistory } from './core/rating/learn.js';
 import { initConfig } from './init.js';
+import { trustProject } from './trust.js';
 import { updateSmart } from './update.js';
 import { describeRating } from './rate.js';
 import { runPrint } from './print.js';
@@ -90,6 +91,14 @@ async function main() {
     process.exit(r.ok ? 0 : 1);
   }
 
+  // `smart trust [--remove]` allows (or withdraws) the settings of this directory's smart.config.json that cross the trust
+  // boundary. Whole command line only, like `init`.
+  if (argv[0] === 'trust' && (argv.length === 1 || (argv.length === 2 && argv[1] === '--remove'))) {
+    const r = trustProject(process.cwd(), { remove: argv[1] === '--remove' });
+    (r.ok ? process.stdout : process.stderr).write(`${r.message}\n`);
+    process.exit(r.ok ? 0 : 1);
+  }
+
   const program = new Command()
     .name('smart')
     .description('Run Claude Code through a router that picks the cheapest capable model for each step.')
@@ -122,6 +131,7 @@ async function main() {
   }
   const { config } = loaded;
   const configWarnings = loaded.warnings;
+  const configNotices = loaded.notices;
   if (opts.budget) config.limits.maxBudgetUsdPerTask = opts.budget;
   if (!opts.review) config.review.enabled = false;
 
@@ -150,7 +160,7 @@ async function main() {
   const previous = opts.continue ? stored : null;
   // A fresh conversation still keeps the file-undo history of this directory: /undo and /diff work across restarts.
   const conversation = previous ?? (stored?.undo ? { ...newConversation(), undo: stored.undo } : undefined);
-  const startupNotices = [...configWarnings, ...(opts.continue
+  const startupNotices = [...configWarnings, ...configNotices, ...(opts.continue
     ? [previous ? `Continuing your previous conversation here (${previous.tasks.length} earlier task${previous.tasks.length === 1 ? '' : 's'}).` : 'No previous conversation in this directory; starting a new one.']
     : [])];
   const checkpoints = await createCheckpoints(cwd);
@@ -168,6 +178,7 @@ async function main() {
     if (!prompt && !opts.resume) return fail('with --print, give a task as an argument or on stdin: smart -p "fix the typo in README"');
     pipeline.forceModel(opts.model ?? null);
     for (const w of configWarnings) process.stderr.write(`smart: warning: ${w}\n`);
+    for (const n of configNotices) process.stderr.write(`smart: ${n}\n`);
     // `kill` / `timeout` / a closed terminal must stop Claude Code too, not orphan it (it would keep editing files and spending money).
     const stop = (code: number) => () => {
       pipeline.cancel();

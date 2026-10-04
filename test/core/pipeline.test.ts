@@ -294,14 +294,31 @@ describe('Pipeline: errors and cancellation', () => {
 });
 
 describe('Pipeline: notices and tracking', () => {
+  it('runs steps with acceptEdits by default and says nothing about bypassing', async () => {
+    const modes: (string | undefined)[] = [];
+    const t = setup({ executor: (_c, _n, o) => { modes.push(o.permissionMode); return res(); } });
+    await t.pipeline.runTask('make the parser handle empty input');
+    expect(modes).toEqual(['acceptEdits']);
+    expect(t.of('notice').some((n) => /bypass/i.test(n.message))).toBe(false);
+  });
+
+  it('warns when /mode switches to bypassPermissions at runtime', () => {
+    const t = setup();
+    t.pipeline.setPermissionMode('bypassPermissions');
+    expect(t.of('notice').some((n) => n.level === 'warn' && /bypassed from now on/.test(n.message))).toBe(true);
+    t.pipeline.setPermissionMode('plan');
+    expect(t.of('notice').filter((n) => /bypassed/.test(n.message))).toHaveLength(1);
+  });
+
   it('warns once when bypassPermissions is active, and explains the root fallback', async () => {
-    const normal = setup();
+    const bypass = (c: SmartConfig) => { c.runner.permissionMode = 'bypassPermissions'; };
+    const normal = setup({ config: bypass });
     await normal.pipeline.runTask('a');
     await normal.pipeline.runTask('b');
     const notices = normal.of('notice').filter((n) => /bypassed/.test(n.message));
     expect(notices).toHaveLength(1);
 
-    const root = setup({ uid: 0 });
+    const root = setup({ uid: 0, config: bypass });
     await root.pipeline.runTask('a');
     expect(root.of('notice').some((n) => /root/.test(n.message))).toBe(true);
   });
