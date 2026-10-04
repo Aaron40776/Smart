@@ -25,7 +25,8 @@ export const cliMissing = () =>
   new SmartError(
     'cli_missing',
     'The `claude` CLI was not found on your PATH.',
-    'Install Claude Code (https://docs.claude.com/claude-code) and make sure `claude` runs in your shell.',
+    'Install Claude Code (https://code.claude.com/docs/en/overview), then run `claude` once to log in. If it is installed ' +
+      'but not on your PATH, set SMART_CLAUDE_BIN to its full path.',
   );
 
 export const authError = (detail: string) =>

@@ -52,7 +52,7 @@ describe('smart.config.example.json', () => {
 describe('documentation', () => {
   it('only mentions settings that exist (routing.planner, limits.maxPlanSteps, ...)', () => {
     const sections = ['models', 'routing', 'escalation', 'limits', 'session', 'runner', 'usage', 'review', 'verify'];
-    const re = new RegExp(`\\b(${sections.join('|')})\\.([A-Za-z]+)`, 'g');
+    const re = new RegExp(`\\b(${sections.join('|')})\\.([A-Za-z_]+)`, 'g');
     const bad: string[] = [];
     for (const [file, text] of Object.entries(docs)) {
       for (const m of text.matchAll(re)) {

@@ -9,10 +9,11 @@ import { describe, expect, it } from 'vitest';
 const tsx = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url));
 const cli = fileURLToPath(new URL('../src/cli.tsx', import.meta.url));
 const fake = fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url));
-function smart(args: string[], env: Record<string, string> = {}) {
+function smart(args: string[], env: Record<string, string> = {}, files: Record<string, string> = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'smart-cli-'));
   const home = join(cwd, 'home');
   mkdirSync(home);
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(cwd, name), text);
   const r = spawnSync(process.execPath, [tsx, cli, ...args], {
     cwd, encoding: 'utf8', timeout: 60_000,
     env: { ...process.env, HOME: home, USERPROFILE: home, SMART_CLAUDE_BIN: fake, FAKE_DELAY_MS: '1', ...env },
@@ -38,6 +39,23 @@ describe('command line contract', () => {
     const r = smart(['-p', '--output-format', 'json', 'fix the typo'], { SMART_CLAUDE_BIN: join(tmpdir(), 'no-such-claude-binary') });
     expect(r.code).toBe(3);
     expect(JSON.parse(r.out).failure.kind).toBe('cli_missing');
+    // The hint says how to fix it, including when claude is installed but not on PATH.
+    expect(r.err).toMatch(/run `claude` once to log in/);
+    expect(r.err).toContain('SMART_CLAUDE_BIN');
+  });
+
+  it('--help lists the commands, the environment and the exit codes', () => {
+    const r = smart(['--help']);
+    expect(r.code).toBe(0);
+    for (const s of ['smart init', 'smart trust', 'smart update', 'SMART_CLAUDE_BIN', 'Exit codes']) expect(r.out).toContain(s);
+  });
+
+  it('--rate reports config warnings on stderr, keeping stdout for the rating', () => {
+    const r = smart(['--rate', 'fix the typo'], {}, { 'smart.config.json': '{"routng":{}}' });
+    expect(r.code).toBe(0);
+    expect(r.err).toMatch(/unknown setting: routng/);
+    expect(r.out).toContain('Decision:');
+    expect(r.out).not.toContain('routng');
   });
 
   it('a successful headless task exits 0 and stdout holds only the JSON document', () => {
