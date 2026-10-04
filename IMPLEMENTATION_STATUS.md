@@ -22,7 +22,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 18 | TUI | done |
 | 19 | Installer and updater | done |
 | 20 | CI, package, release hygiene | done |
-| 21 | Performance | pending |
+| 21 | Performance | done |
 | 22 | Documentation | pending |
 | 24/25 | Final audit and validation | pending |
 
@@ -327,6 +327,18 @@ Windows PowerShell 5.1 (PS 5.1 itself is not available here).
   GitHub, which this session cannot do reliably). There are no release tags in the repository yet; `SMART_REF` works with any ref, and tagging
   releases is a maintainer step (documented as a recommendation, not done: it is an outward action nobody asked for).
 
+## Phase 21: performance (done)
+
+Inspected: repository scans (`projectFiles` once per plan, 80 files, lazy existence checks; the TUI's 400-file list once per finished task),
+file reads (per attempt on purpose: a retry must see the files as they are now), prompt sizes (memory ≤ 3.5k chars, context ≤
+`limits.maxContextBytes`), context gathering (deduplicated in Phase 4/5), process start-up (kept-alive + spares unchanged), routing (pure),
+persistence writes.
+Change: `limits.json` was rewritten on every `rate_limit_event` (several per call), synchronously inside the stream handler, and since
+Phase 6 every atomic write fsyncs. It is a cache: unchanged reports are now re-saved at most once a minute and written without the flush
+(`writeFileAtomic(..., { durable: false })`). History, conversations, trust and input history keep the durable write.
+Measured the hot paths this work added: `forTerminal` on 20,000 streamed deltas 12 ms; `buildHistory` over 1000 tasks × 6 steps 4.4 ms.
+No speculative micro-optimizations.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -357,6 +369,7 @@ Windows PowerShell 5.1 (PS 5.1 itself is not available here).
   `src/core/pipeline.ts`, `README.md`.
 - Phase 18: `src/ui/App.tsx`, `src/ui/commands.ts`, `README.md`.
 - Phase 19/20: `src/update.ts`, `src/cli.tsx`, `install.ps1`, `.github/workflows/ci.yml`, `scripts/check-pack.mjs` (new), `README.md`.
+- Phase 21: `src/core/store/limits.ts`, `src/core/store/atomicFile.ts` (`durable` option).
 
 ## Tests added or changed
 
@@ -392,6 +405,7 @@ Windows PowerShell 5.1 (PS 5.1 itself is not available here).
 - Phase 18: `test/ui/app.test.tsx` (+1 header indicators for bypass/default). Result: 740 passed, 1 skipped.
 - Phase 19: new `test/update.test.ts` (10 real-git scenarios); the old `smart update` tests in `test/batch1.test.tsx` asserted the destructive
   lockfile checkout and were replaced (not weakened: every behaviour they covered is covered again). Result: 747 passed, 1 skipped.
+- Phase 21: `test/core/schema.test.ts` (+1 limits cache write throttling). Result: 748 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

@@ -142,3 +142,20 @@ describe('caches and the trust file', () => {
     expect(existsSync(`${f}.lock`)).toBe(false);
   });
 });
+
+describe('limits cache writes', () => {
+  it('does not rewrite an unchanged report within a minute, but does when it changes or a minute passed', () => {
+    const f = join(tmp(), 'limits.json');
+    const store = new LimitsStore(f);
+    const w = { five_hour: { utilization: 0.5 } };
+    store.save({ at: 1_000, windows: w });
+    writeFileSync(f, 'sentinel'); // stands in for "was it written again?"
+    store.save({ at: 2_000, windows: w });
+    expect(readFileSync(f, 'utf8')).toBe('sentinel');
+    store.save({ at: 3_000, windows: { five_hour: { utilization: 0.6 } } });
+    expect(JSON.parse(readFileSync(f, 'utf8')).windows.five_hour.utilization).toBe(0.6);
+    writeFileSync(f, 'sentinel');
+    store.save({ at: 70_000, windows: { five_hour: { utilization: 0.6 } } });
+    expect(readFileSync(f, 'utf8')).not.toBe('sentinel');
+  });
+});

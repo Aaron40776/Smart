@@ -201,14 +201,15 @@ function renameRetrying(from: string, to: string): void {
  * smart sessions must not share one), flushed to disk, then renamed over the target. Owner-only permissions, since history
  * and conversations contain your prompts. The temp file is removed if anything fails.
  */
-export function writeFileAtomic(file: string, text: string): void {
+export function writeFileAtomic(file: string, text: string, opts: { durable?: boolean } = {}): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
     const fd = openSync(tmp, 'wx', 0o600);
     try {
       writeFileSync(fd, text);
-      fsyncSync(fd);
+      // `durable: false` for caches that are rewritten all the time: a flush to disk can take tens of ms on Windows.
+      if (opts.durable !== false) fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
