@@ -24,7 +24,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 20 | CI, package, release hygiene | done |
 | 21 | Performance | done |
 | 22 | Documentation | done |
-| 24/25 | Final audit and validation | pending |
+| 24/25 | Final audit and validation | done |
 
 ## Phase 1: baseline (done)
 
@@ -350,6 +350,49 @@ Docs were updated in each phase alongside the code; this pass checked for anythi
 - CHANGELOG.md: an "Unreleased" entry. The version number was not bumped (a release decision for the maintainer).
 Claims are limited to what the code does; the docs drift test (`test/docs.test.ts`) passes.
 
+## Phase 24: final full-codebase audit (done)
+
+Searched the whole tree for each listed risk class:
+- **Unsafe defaults**: permission mode is `acceptEdits`; `verify.auto` stays on by design (documented: checks run project scripts).
+- **Destructive git**: none left in `src/` or `install.ps1` (the only `checkout --` is text suggesting a manual command to the user).
+- **External commands / shell interpolation**: every spawn inventoried (Phase 3 table). **Bug fixed**: `smart update --stash` ran
+  `git stash push -m "smart update <time>"` through the Windows shell, which joins arguments unquoted (the message split into pathspecs);
+  now only npm uses the shell (`needsShell`).
+- **Path joins**: all remaining joins take fixed names or git-reported repository paths.
+- **Unlocked read-modify-write**: history, conversations, trust and input history are locked; `limits.json` is a whole-file overwrite (no RMW).
+- **Unversioned persisted data**: `limits.json` and `input-history.json` only, both caches (documented).
+- **Stale process assumptions**: every kill goes through `isRunning`-guarded paths; no pid is persisted.
+- **Exit codes / stdout in JSON mode**: all exits go through `exitCodeFor`/`EXIT`; nothing but `runPrint` writes stdout in `-p` mode.
+- **Config trust bypasses**: found one more project-controlled input, a repository's own `.claude/settings.json`/`.local.json` (Claude Code
+  hooks and permission allow rules apply in every step and can widen `acceptEdits`). smart now names hooks, permissive allow rules and
+  `defaultMode` at startup (`src/core/claudeSettings.ts`). Not blocked: see "Unresolved".
+- **Windows correctness of the new code**: restore now refuses to *write* through a folder that resolves outside the project (it relied on
+  git's handling, verified on Linux only; junction behaviour of Git for Windows is not verifiable here). Folder-link tests use junctions, so they
+  run on Windows CI too. `SMART_CLAUDE_BIN` pointing at a `.js/.mjs` stand-in now runs through Node (the fixture's documented demo usage, and
+  the new CLI tests, would otherwise fail on Windows).
+- **Missing tests**: added `test/cli.test.ts` (8 tests running the real entry point: usage errors, JSON error documents, missing Claude,
+  success, nothing to resume, `smart trust`, `--rate`, `.claude/settings.json` warning).
+
+## Phase 25: final validation (done)
+
+| Command | Result |
+| --- | --- |
+| `npm run lint` | pass |
+| `npm run typecheck` | pass (now also covers `bench/`) |
+| `npm test` | 63 files; 762 passed, 1 skipped (the live-Claude E2E, `SMART_E2E=1`) |
+| `npm run build` | pass |
+| `npm run check` | pass |
+| `npm run bench` (20 seeds) | runs in ~3 s; identical numbers on repeated runs |
+| `node scripts/check-pack.mjs` | 8 files: dist/cli.js(+map), docs, LICENSE, package.json, example config |
+| `npm audit` | 0 vulnerabilities |
+| installer (PowerShell 7.4 on Linux, stand-in npm.cmd) | parse ok; 8 scenarios behave as intended (Phase 19) |
+| built CLI with the fake Claude | exit codes and JSON documents as documented; TUI one-shot run under a pty exits 0 |
+
+Not run here: Windows itself (CI runs Windows, Node 22/24, including PowerShell 5.1 parsing and the real install), and anything needing the real
+Claude Code (the E2E smoke test and `npm run bench -- --live`: no Claude login in this environment).
+Final diff inspected: no debug output, `.only`, secrets, generated files or new dependencies; no functionality removed (`/mode auto` still
+accepted; `smart update` keeps working, now non-destructively).
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -382,6 +425,8 @@ Claims are limited to what the code does; the docs drift test (`test/docs.test.t
 - Phase 19/20: `src/update.ts`, `src/cli.tsx`, `install.ps1`, `.github/workflows/ci.yml`, `scripts/check-pack.mjs` (new), `README.md`.
 - Phase 21: `src/core/store/limits.ts`, `src/core/store/atomicFile.ts` (`durable` option).
 - Phase 22: `README.md`, `ROUTING.md`, `CONTRIBUTING.md`, `CHANGELOG.md`.
+- Phase 24: `src/update.ts`, `src/core/checkpoint.ts`, `src/core/pipeline/changes.ts`, `src/core/claudeSettings.ts` (new), `src/core/claude.ts`,
+  `src/cli.tsx`, `README.md`.
 
 ## Tests added or changed
 
@@ -418,7 +463,24 @@ Claims are limited to what the code does; the docs drift test (`test/docs.test.t
 - Phase 19: new `test/update.test.ts` (10 real-git scenarios); the old `smart update` tests in `test/batch1.test.tsx` asserted the destructive
   lockfile checkout and were replaced (not weakened: every behaviour they covered is covered again). Result: 747 passed, 1 skipped.
 - Phase 21: `test/core/schema.test.ts` (+1 limits cache write throttling). Result: 748 passed, 1 skipped.
+- Phase 24: new `test/cli.test.ts` (8) and `test/core/claudeSettings.test.ts` (3); `test/update.test.ts` (+1 shell use);
+  `test/core/checkpoint.test.ts` (folder-link tests on junctions, write-through-link refusal, deleted-folder restore); `test/core/paths.test.ts`
+  (junction); `test/core/claude.test.ts` (+1 JS `SMART_CLAUDE_BIN`). Result: 762 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 
-(filled in as phases complete)
+- **Repository-shipped Claude Code settings** (`.claude/settings.json`) are named at startup, not blocked. Blocking would mean starting coding
+  steps with `--setting-sources user`, whose exact effect (it may also drop the project's CLAUDE.md) could not be verified against a real Claude
+  Code here; a wrong guess would silently degrade every project. Worth deciding with a real Claude Code at hand.
+- **Verify commands keep cmd.exe's normal lookup**, and automatic checks run the project's package.json scripts (that is what verification is).
+  Documented in README Safety; users of untrusted code can set `verify.auto: false` globally.
+- **Lock residual race**: if three processes contend for a stale lock within microseconds, the put-back of a wrongly moved fresh lock can fail
+  (documented in `atomicFile.ts`). No cross-process lock on the working tree between `/undo` in one smart and a task in another.
+- **Routing thresholds were not retuned**: the benchmark's capabilities are assumptions; tuning against them would be circular. `--live` exists to
+  check them against real models.
+- **`pipeline.ts` was not split further** (Phase 10 reasoning); decision logic was extracted as pure functions instead.
+- **GitHub Actions are pinned by version tag, not SHA**, and **no release tags exist** (`SMART_REF` works with any ref). Tagging releases and
+  bumping the version (the CHANGELOG has an "Unreleased" entry) are maintainer decisions.
+- **Git's own configuration** (`core.fsmonitor`, filters) in a repository is the user's and is not overridden by checkpoints.
+- **Windows-only behaviour verified indirectly**: junction handling, `taskkill`, cmd.exe exit code 9009 and PowerShell 5.1 were reasoned about and
+  unit-tested with injected platforms; CI on Windows is the real check.
