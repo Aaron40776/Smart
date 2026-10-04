@@ -101,6 +101,8 @@ Costs shown are what Claude Code reports. Routing rules and every setting: **[RO
   (`runner.permissionMode`, `runner.bare`), pass flags to Claude Code (`runner.extraArgs`), move your history files (`trackerPath`, ...) or lift your budget
   caps are ignored, with a warning, until you read the file and run `smart trust` in that directory. Trust covers the file's exact contents: if it
   changes (a pull, another branch), those settings are ignored again. `smart trust --remove` withdraws it. A file you name with `--config` is yours and always applies.
+- **The project's own Claude Code settings still apply.** A `.claude/settings.json` in the repository can define hooks (commands Claude Code runs automatically)
+  and permission rules that let commands run without asking; Claude Code applies them in every step. `smart` names such settings at startup.
 - **Undo.** Run it in a git repository: `/undo` needs one. Details in [ROUTING.md](ROUTING.md#undo-and-safety-net).
 
 ## Development

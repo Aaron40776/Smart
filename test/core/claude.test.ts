@@ -223,6 +223,9 @@ describe('resolveClaudeCommand', () => {
   it('honours SMART_CLAUDE_BIN', () => {
     expect(resolveClaudeCommand('win32', { SMART_CLAUDE_BIN: 'D:\\c.exe' }, () => false)).toEqual({ cmd: 'D:\\c.exe', prefix: [] });
   });
+  it('runs a JavaScript SMART_CLAUDE_BIN through node (Windows cannot start a .mjs itself)', () => {
+    expect(resolveClaudeCommand('win32', { SMART_CLAUDE_BIN: 'C:\\fake-claude.mjs' }, () => false)).toEqual({ cmd: process.execPath, prefix: ['C:\\fake-claude.mjs'] });
+  });
   it('finds claude.exe on the Windows PATH', () => {
     expect(win(['C:\\Tools\\claude.exe'])).toEqual({ cmd: 'C:\\Tools\\claude.exe', prefix: [] });
   });

@@ -100,7 +100,7 @@ export class ChangeTracker {
     if (!r) return emit({ type: 'notice', level: 'warn', message: 'Could not restore the previous state (the snapshot may have been cleaned up by git gc, or git failed part-way: check `git status`). The undo entry is kept.' });
     if (r.failed.length) {
       // Keep the entry: running /undo again retries once the file is free; nothing is reported as undone that was not.
-      return emit({ type: 'notice', level: 'warn', message: `Undo was incomplete: ${undoSummary(r.restored, r.removed)}, but could not remove ${r.failed.map((f) => this.fromRoot(f)).join(', ')} (in use, or its folder now points outside the project). Fix that and run /undo again.` });
+      return emit({ type: 'notice', level: 'warn', message: `Undo was incomplete: ${undoSummary(r.restored, r.removed)}, but could not put back ${r.failed.map((f) => this.fromRoot(f)).join(', ')} (in use, or its folder now points outside the project). Fix that and run /undo again.` });
     }
     conv.undo = conv.undo?.slice(0, -1);
     // The task that was undone (not simply the latest: after a restart or a question in between they differ). Memory keeps a clipped prompt.

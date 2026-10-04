@@ -197,9 +197,11 @@ describe('GitCheckpoints: scoped to the project directory (monorepo)', () => {
 
 
 describe('GitCheckpoints: restore stays inside the project', () => {
-  const linkable = process.platform !== 'win32'; // symlinks need extra rights on Windows; junction behaviour is covered by realpath there
+  // File symlinks need extra rights on Windows; folder links are made as junctions there (no rights needed), so those tests run everywhere.
+  const linkable = process.platform !== 'win32';
+  const linkFolder = (target: string, at: string) => symlinkSync(target, at, 'junction');
 
-  it.runIf(linkable)('never deletes through a folder that now links outside the project', async () => {
+  it('never deletes through a folder that now links outside the project', async () => {
     const d = repo();
     const outside = mkdtempSync(join(tmpdir(), 'smart-outside-'));
     writeFileSync(join(outside, 'precious.txt'), 'do not delete');
@@ -210,7 +212,7 @@ describe('GitCheckpoints: restore stays inside the project', () => {
     const end = (await c.snapshot())!;
     // After the task, `gen` is replaced by a link to a folder outside the project holding a file of the same name.
     rmSync(join(d, 'gen'), { recursive: true });
-    symlinkSync(outside, join(d, 'gen'));
+    linkFolder(outside, join(d, 'gen'));
     const r = (await c.restore(start, end))!;
     expect(r.removed).toBe(0);
     expect(r.failed).toEqual(['gen/precious.txt']);
@@ -231,7 +233,7 @@ describe('GitCheckpoints: restore stays inside the project', () => {
     expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('keep me');
   });
 
-  it.runIf(linkable)('writes restored files into the project even when a folder became a link (git replaces the link)', async () => {
+  it('never writes a restored file through a folder that now links outside the project', async () => {
     const d = repo();
     mkdirSync(join(d, 'sub'));
     writeFileSync(join(d, 'sub', 'a.txt'), 'orig');
@@ -241,9 +243,22 @@ describe('GitCheckpoints: restore stays inside the project', () => {
     writeFileSync(join(d, 'sub', 'a.txt'), 'changed');
     const end = (await c.snapshot())!;
     rmSync(join(d, 'sub'), { recursive: true });
-    symlinkSync(outside, join(d, 'sub'));
-    await c.restore(start, end, ['sub/a.txt']);
+    linkFolder(outside, join(d, 'sub'));
+    const r = (await c.restore(start, end, ['sub/a.txt']))!;
     expect(existsSync(join(outside, 'a.txt'))).toBe(false);
+    expect(r.failed).toEqual(['sub/a.txt']);
+    expect(r.restored).toBe(0);
+  });
+
+  it('restores a file whose folder was deleted (the folder is recreated inside the project)', async () => {
+    const d = repo();
+    mkdirSync(join(d, 'sub'));
+    writeFileSync(join(d, 'sub', 'a.txt'), 'orig');
+    const c = await cp(d);
+    const start = (await c.snapshot())!;
+    rmSync(join(d, 'sub'), { recursive: true });
+    const end = (await c.snapshot())!;
+    expect(await c.restore(start, end)).toEqual({ restored: 1, removed: 0, failed: [] });
     expect(readFileSync(join(d, 'sub', 'a.txt'), 'utf8')).toBe('orig');
   });
 

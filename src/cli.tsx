@@ -7,6 +7,7 @@ import { render } from 'ink';
 import pkg from '../package.json' with { type: 'json' };
 import { resolveClaudeCommand } from './core/claude.js';
 import { createClaudeRunner } from './core/claudeProcess.js';
+import { claudeProjectSettingsWarning } from './core/claudeSettings.js';
 import { classifierCall } from './core/classifier.js';
 import { expandHome, globalConfigPath, loadConfig } from './core/config.js';
 import { EventBus } from './core/events.js';
@@ -154,7 +155,8 @@ async function main() {
     return fail((e as Error).message, undefined, e instanceof SmartError ? e.kind : 'config');
   }
   const { config } = loaded;
-  const configWarnings = loaded.warnings;
+  const claudeSettings = claudeProjectSettingsWarning(cwd);
+  const configWarnings = claudeSettings ? [...loaded.warnings, claudeSettings] : loaded.warnings;
   const configNotices = loaded.notices;
   if (opts.budget) config.limits.maxBudgetUsdPerTask = opts.budget;
   if (!opts.review) config.review.enabled = false;

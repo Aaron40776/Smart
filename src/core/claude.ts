@@ -483,7 +483,8 @@ export function resolveClaudeCommand(
   env: Record<string, string | undefined> = process.env,
   exists: (p: string) => boolean = existsSync,
 ): ClaudeCommand {
-  if (env.SMART_CLAUDE_BIN) return { cmd: env.SMART_CLAUDE_BIN, prefix: [] };
+  // A JavaScript file (a stand-in such as test/fixtures/fake-claude.mjs) runs through Node: Windows cannot start it directly.
+  if (env.SMART_CLAUDE_BIN) return /\.(c|m)?js$/i.test(env.SMART_CLAUDE_BIN) ? { cmd: process.execPath, prefix: [env.SMART_CLAUDE_BIN] } : { cmd: env.SMART_CLAUDE_BIN, prefix: [] };
   if (platform !== 'win32') return { cmd: 'claude', prefix: [] };
   const w = path.win32;
   // Absolute PATH entries only: `.` or an empty entry would mean the project folder.

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path, { join } from 'node:path';
-import { insideRel, unsafePathReason } from './paths.js';
+import { insideRel, realPathOf, unsafePathReason } from './paths.js';
 import { programPath } from './which.js';
 
 export interface FileChange {
@@ -38,7 +38,7 @@ export interface Checkpointer {
   /**
    * Make the working tree match `target` again (only files that differ from `current` are touched).
    * With `only`, just those repo-relative paths: the files one task changed, not every edit since.
-   * `failed` lists files it could not put back (a file that is locked, a folder that now links out of the project).
+   * `failed` lists files it could not put back or remove (a file that is locked, a folder that now links out of the project).
    * Null when nothing could be done; files may still have been written if git failed part-way.
    */
   restore(target: string, current: string, only?: string[]): Promise<RestoreResult | null>;
@@ -178,7 +178,10 @@ export class GitCheckpoints implements Checkpointer {
     const scope = only ? new Set(only) : null;
     // Never outside the project directory, whatever a (persisted) list says.
     const files = (scope ? ch.files.filter((f) => scope.has(f.path)) : ch.files).filter((f) => this.inScope(f.path));
-    const toWrite = files.filter((f) => f.status !== 'A').map((f) => f.path); // in target, changed or deleted since
+    const failed: string[] = [];
+    // A file whose folder now resolves outside the project (replaced by a symlink or junction) is not written: git replaces
+    // such a link on Linux, but smart does not rely on how each git build treats Windows junctions.
+    const toWrite = files.filter((f) => f.status !== 'A').map((f) => f.path).filter((p) => (this.writable(p) ? true : (failed.push(p), false)));
     const toRemove = files.filter((f) => f.status === 'A').map((f) => f.path); // created since the target
     let restored = 0;
     if (toWrite.length > 0) {
@@ -194,7 +197,6 @@ export class GitCheckpoints implements Checkpointer {
       restored = toWrite.length;
     }
     let removed = 0;
-    const failed: string[] = [];
     for (const rel of toRemove) {
       const file = this.removable(rel);
       if (!file) {
@@ -210,6 +212,18 @@ export class GitCheckpoints implements Checkpointer {
       }
     }
     return { restored, removed, failed };
+  }
+
+  /** Whether `rel` may be written: a plain path in scope whose folder (or nearest existing ancestor) is really inside the repository. */
+  private writable(rel: string): boolean {
+    if (unsafePathReason(rel, { platform: 'linux' }) || !this.inScope(rel)) return false;
+    try {
+      const root = realpathSync(this.root);
+      const folder = realPathOf(join(this.root, ...rel.split('/').slice(0, -1)));
+      return folder === root || insideRel(path.relative(root, folder));
+    } catch {
+      return false;
+    }
   }
 
   /** Whether a repo-relative path lies in the project directory smart runs in (the whole repository at the top). */

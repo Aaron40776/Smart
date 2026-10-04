@@ -7,9 +7,11 @@ export type RunCommand = (cmd: string, args: string[], cwd: string) => number;
 /** Runs one command in `cwd` quietly; returns the exit code and what it printed. */
 export type CaptureCommand = (cmd: string, args: string[], cwd: string) => { code: number; stdout: string };
 
-// Through the shell on Windows so `npm` finds npm.cmd. The arguments are fixed strings, never user input, and the working
-// directory is smart's own installation folder.
-const run: RunCommand = (cmd, args, cwd) => spawnSync(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' }).status ?? 1;
+// npm goes through the shell on Windows so it finds npm.cmd; its arguments are fixed words. Nothing else does: the shell joins
+// arguments without quoting, so `git stash push -m "smart update <time>"` would split into pathspecs. The working directory is
+// smart's own installation folder.
+export const needsShell = (cmd: string, platform: string = process.platform): boolean => platform === 'win32' && cmd === 'npm';
+const run: RunCommand = (cmd, args, cwd) => spawnSync(cmd, args, { cwd, stdio: 'inherit', shell: needsShell(cmd) }).status ?? 1;
 const capture: CaptureCommand = (cmd, args, cwd) => {
   const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   return { code: r.status ?? 1, stdout: r.stdout ?? '' };

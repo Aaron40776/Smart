@@ -156,3 +156,12 @@ describe('smart update', () => {
     expect(d.lines[0]).toMatch(/not installed with git.*install\.ps1/);
   });
 });
+
+describe('smart update: how commands are started', () => {
+  it('only npm goes through the shell on Windows (it joins arguments unquoted: a stash message with spaces would split)', async () => {
+    const { needsShell } = await import('../src/update.js');
+    expect(needsShell('npm', 'win32')).toBe(true);
+    expect(needsShell('git', 'win32')).toBe(false);
+    expect(needsShell('npm', 'linux')).toBe(false);
+  });
+});

@@ -50,13 +50,12 @@ describe('resolveInside: the real location must stay inside the project', () => 
     writeFileSync(join(root, 'src', 'a.ts'), 'x');
     expect(resolveInside(root, 'src/a.ts')?.rel).toBe('src/a.ts');
     expect(resolveInside(root, 'src/not-yet.ts')?.rel).toBe('src/not-yet.ts');
-    if (process.platform !== 'win32') {
-      const outside = dir();
-      writeFileSync(join(outside, 'secret'), 's');
-      symlinkSync(outside, join(root, 'out'));
-      expect(resolveInside(root, 'out/secret')).toBeNull();
-      expect(resolveInside(root, 'out/missing')).toBeNull();
-    }
+    // A folder link (a junction on Windows, where it needs no special rights) that leads out of the project.
+    const outside = dir();
+    writeFileSync(join(outside, 'secret'), 's');
+    symlinkSync(outside, join(root, 'out'), 'junction');
+    expect(resolveInside(root, 'out/secret')).toBeNull();
+    expect(resolveInside(root, 'out/missing')).toBeNull();
   });
 
   it('allows an absolute path you typed only when it is inside the project', () => {
