@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-04)
 
 **Safety**
 - **Steps run with `acceptEdits` by default** (was `bypassPermissions`), in the schema, `smart init` and the example config. `bypassPermissions` still works when

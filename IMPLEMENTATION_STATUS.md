@@ -469,7 +469,7 @@ accepted; `smart update` keeps working, now non-destructively).
 
 ## Unresolved / intentionally unchanged
 
-- **Repository-shipped Claude Code settings** (`.claude/settings.json`) are named at startup, not blocked. Blocking would mean starting coding
+- **Repository-shipped Claude Code settings** (`.claude/settings.json`) are named at startup, not blocked (decided: keep the warning until it can be verified). Blocking would mean starting coding
   steps with `--setting-sources user`, whose exact effect (it may also drop the project's CLAUDE.md) could not be verified against a real Claude
   Code here; a wrong guess would silently degrade every project. Worth deciding with a real Claude Code at hand.
 - **Verify commands keep cmd.exe's normal lookup**, and automatic checks run the project's package.json scripts (that is what verification is).
@@ -480,7 +480,7 @@ accepted; `smart update` keeps working, now non-destructively).
   check them against real models.
 - **`pipeline.ts` was not split further** (Phase 10 reasoning); decision logic was extracted as pure functions instead.
 - **GitHub Actions are pinned by version tag, not SHA**, and **no release tags exist** (`SMART_REF` works with any ref). Tagging releases and
-  bumping the version (the CHANGELOG has an "Unreleased" entry) are maintainer decisions.
+  pushing a tag are maintainer steps; the version is 0.4.0 in this branch (the permission default change can break workflows), to be tagged after merge.
 - **Git's own configuration** (`core.fsmonitor`, filters) in a repository is the user's and is not overridden by checkpoints.
 - **Windows-only behaviour verified indirectly**: junction handling, `taskkill`, cmd.exe exit code 9009 and PowerShell 5.1 were reasoned about and
   unit-tested with injected platforms; CI on Windows is the real check.

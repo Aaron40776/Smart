@@ -1,6 +1,6 @@
 {
   "name": "@aaron40776/smart",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Interactive TUI that wraps Claude Code to maximize result quality while minimizing token usage",
   "type": "module",
   "license": "MIT",
