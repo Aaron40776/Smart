@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `smart --help` lists the `init`, `trust` and `update` commands, the `SMART_CLAUDE_BIN` and `SMART_DEBUG` variables and the exit codes.
+- The "Claude Code not found" error links to the Claude Code docs (the old link now lands on a generic page) and mentions `SMART_CLAUDE_BIN`.
+- `smart --rate` shows config warnings (unknown keys, settings ignored from an untrusted project file) on stderr; they change the rating.
+- Docs: README rewritten (what smart is, how routing works, requirements, uninstall, troubleshooting); CONTRIBUTING gains commands,
+  release notes and known limitations; a short `CLAUDE.md` for Claude Code sessions in this repository. The engineering hand-off
+  record `IMPLEMENTATION_STATUS.md` was removed (it is in git history; its open points are in CONTRIBUTING's known limitations).
+
 ## 0.4.0 (2026-10-04)
 
 **Safety**
@@ -50,6 +59,9 @@
 - `SMART_DEBUG=1` also logs when a kept-alive process is given up (`"keepAlive":"given up"`, with the reason and Claude Code's error output), so a fallback to one `claude` per call is visible.
 
 ## 0.3.0 (2026-09-30)
+
+*0.3.0 also collects everything since 0.2.0, newest first, in the groups below. Older groups describe intermediate states that later ones
+replace (for example, CI ran on Linux, Windows and macOS before it moved to Windows only, and `npm run bench` was removed before 0.4.0 added a new one).*
 
 - Fix: a kept-alive `claude` process that never answers (an older Claude Code that ignores `--input-format stream-json`) no longer hangs the step: after 30 s without any output it is given up and the call runs the classic way, which is safe because nothing has reached the API by then. A model switch the process refuses or does not confirm within 10 s moves the step to a fresh process on the new model instead of failing it.
 - Fix: `smart update` and `install.ps1` install with `npm ci`, which never rewrites `package-lock.json`. `npm install` could rewrite it and then block the next update's `git pull`; a lockfile changed that way is put back before pulling.

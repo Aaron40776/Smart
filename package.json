@@ -1,7 +1,7 @@
 {
   "name": "@aaron40776/smart",
   "version": "0.4.0",
-  "description": "Interactive TUI that wraps Claude Code to maximize result quality while minimizing token usage",
+  "description": "Terminal UI and CLI that runs Claude Code on the cheapest model and effort that can do each step well, escalating only when a step fails",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -25,7 +25,9 @@
     "tui",
     "ink",
     "llm",
-    "cost"
+    "cost",
+    "model-routing",
+    "windows"
   ],
   "repository": {
     "type": "git",

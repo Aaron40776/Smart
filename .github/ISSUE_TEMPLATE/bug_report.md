@@ -18,6 +18,8 @@ labels: bug
 - Claude Code version (`claude --version`):
 - smart version (`smart --version`):
 
-**Config** (contents of `smart.config.json`, if any)
+**Exit code** (and, with `smart -p --output-format json`, the `failure` field)
+
+**Config** (contents of `smart.config.json`, if any; remove anything private)
 
 **Logs / screenshot**
