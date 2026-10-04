@@ -24,7 +24,9 @@ function fixture() {
   git(upstream, 'add', '-A');
   git(upstream, 'commit', '-qm', 'v0.3.0');
   const root = join(tmp('smart-inst-'), 'Smart');
-  execFileSync('git', ['clone', '-q', upstream, root]);
+  // Line endings as committed, whatever the machine's git config says (Git for Windows defaults to core.autocrlf=true, which
+  // would check the files out with CRLF and, once the clone is set to autocrlf=false below, show them as changed).
+  execFileSync('git', ['-c', 'core.autocrlf=false', 'clone', '-q', upstream, root]);
   setIdentity(root);
   const release = (version: string, file = 'package.json') => {
     writeFileSync(join(upstream, file), file === 'package.json' ? JSON.stringify({ version }) : `${version}\n`);
