@@ -3,6 +3,8 @@ import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import type { Classification, Complexity, ModelTier, Plan } from '../types.js';
 import { quarantineCorrupt, withFileLock, writeFileAtomic } from './atomicFile.js';
+import { newerFormat, readVersioned, type Migration } from './schema.js';
+import { COMPLEXITIES } from '../types.js';
 
 export interface TaskMemory {
   prompt: string;
@@ -101,16 +103,40 @@ function validUndo(u: unknown): UndoEntry[] | undefined {
   return ok.length ? ok : undefined;
 }
 
-function validPending(p: unknown): PendingTask | undefined {
+const isStrings = (a: unknown): a is string[] => Array.isArray(a) && a.every((x) => typeof x === 'string');
+
+/** A stored plan step that can run again: model-written text, so every field is checked rather than trusted. */
+const isPlanStep = (s: unknown): boolean => {
+  const x = s as Record<string, unknown> | null;
+  return !!x && typeof x.id === 'string' && typeof x.title === 'string' && typeof x.instructions === 'string' && isStrings(x.files) && isStrings(x.acceptance);
+};
+
+/** An unfinished task `/resume` can continue: a plan with at least one well-formed step, and a known classification. */
+export function validPending(p: unknown): PendingTask | undefined {
   const t = p as Partial<PendingTask> | null | undefined;
-  if (!t || typeof t.prompt !== 'string' || !t.plan || !Array.isArray(t.plan.steps) || !t.classification || !Array.isArray(t.doneStepIds)) return undefined;
+  if (!t || typeof t.prompt !== 'string' || !t.plan || !Array.isArray(t.plan.steps) || t.plan.steps.length === 0 || !t.plan.steps.every(isPlanStep)) return undefined;
+  if (!t.classification || !COMPLEXITIES.includes(t.classification.complexity) || !isStrings(t.doneStepIds)) return undefined;
   return t as PendingTask;
 }
 
+const OUTCOMES = new Set(['done', 'failed', 'cancelled', 'reverted']);
+const validTask = (t: unknown): t is TaskMemory => {
+  const x = t as Partial<TaskMemory> | null;
+  return !!x && typeof x.prompt === 'string' && OUTCOMES.has(x.outcome as string) && isStrings(x.files) && typeof x.reply === 'string' && typeof x.at === 'string';
+};
+
+export const CONVERSATIONS_VERSION = 1;
+/** conversations.json has only ever been version 1 (see schema.ts). */
+const MIGRATIONS: Record<number, Migration> = {};
+
 interface StoreFile {
-  version: 1;
+  version: number;
   byDir: Record<string, Conversation & { updatedAt: string }>;
+  /** Set when a newer smart wrote the file: it is read, never written. */
+  newer?: number;
 }
+
+const updated = (e: unknown): string => String((e as { updatedAt?: unknown } | null)?.updatedAt ?? '');
 
 /**
  * The key a project directory is stored under. Windows paths are case-insensitive: `C:\Users\Me\app` and `c:\users\me\app`
@@ -131,41 +157,60 @@ export class ConversationStore {
   /** The entry for `cwd`: under its key, or (older files) under any spelling of the same folder, the most recent first. */
   private find(byDir: StoreFile['byDir'], cwd: string): StoreFile['byDir'][string] | undefined {
     const key = dirKey(cwd, this.platform);
-    return byDir[key] ?? Object.entries(byDir).filter(([k]) => dirKey(k, this.platform) === key).sort((a, b) => b[1].updatedAt.localeCompare(a[1].updatedAt))[0]?.[1];
+    return byDir[key] ?? Object.entries(byDir).filter(([k]) => dirKey(k, this.platform) === key).sort((a, b) => updated(b[1]).localeCompare(updated(a[1])))[0]?.[1];
   }
 
   private read(): StoreFile {
-    if (!existsSync(this.path)) return { version: 1, byDir: {} };
+    const empty: StoreFile = { version: CONVERSATIONS_VERSION, byDir: {} };
+    if (!existsSync(this.path)) return empty;
+    let json: unknown;
     try {
-      const d = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<StoreFile>;
-      return { version: 1, byDir: d.byDir && typeof d.byDir === 'object' ? d.byDir : {} };
+      json = JSON.parse(readFileSync(this.path, 'utf8'));
     } catch {
       quarantineCorrupt(this.path); // keep it for inspection rather than silently overwriting it on the next save
-      return { version: 1, byDir: {} };
+      return empty;
     }
+    const v = readVersioned(json, CONVERSATIONS_VERSION, MIGRATIONS);
+    if (v.status === 'invalid') {
+      quarantineCorrupt(this.path);
+      return empty;
+    }
+    const byDir = v.data.byDir && typeof v.data.byDir === 'object' && !Array.isArray(v.data.byDir) ? (v.data.byDir as StoreFile['byDir']) : {};
+    return { version: CONVERSATIONS_VERSION, byDir, ...(v.status === 'newer' ? { newer: v.version } : {}) };
   }
 
+  /** The conversation for `cwd`. Damaged parts are dropped (a bad task memory, a /resume plan that is not well formed), the rest kept. */
   load(cwd: string): Conversation | null {
     const c = this.find(this.read().byDir, cwd);
-    if (!c || !Array.isArray(c.tasks)) return null;
-    return { id: c.id, sessionId: c.sessionId ?? null, lastTier: c.lastTier, lastCallAt: c.lastCallAt, lastCallAtByTier: c.lastCallAtByTier, tasks: c.tasks, pending: validPending(c.pending), undo: validUndo(c.undo), ...(typeof c.contextTokens === 'number' ? { contextTokens: c.contextTokens } : {}) };
+    if (!c || typeof c !== 'object' || !Array.isArray(c.tasks)) return null;
+    return {
+      id: typeof c.id === 'string' ? c.id : randomUUID(),
+      sessionId: typeof c.sessionId === 'string' ? c.sessionId : null,
+      lastTier: c.lastTier, lastCallAt: c.lastCallAt, lastCallAtByTier: c.lastCallAtByTier,
+      tasks: c.tasks.filter(validTask), pending: validPending(c.pending), undo: validUndo(c.undo),
+      ...(typeof c.contextTokens === 'number' ? { contextTokens: c.contextTokens } : {}),
+    };
   }
 
   /** Returns an error message when it could not be saved. */
   save(cwd: string, conv: Conversation, now = new Date()): string | null {
     try {
+      let skipped: string | null = null;
       withFileLock(this.path, () => {
         const file = this.read();
+        if (file.newer) {
+          skipped = newerFormat(this.path, file.newer);
+          return;
+        }
         const key = dirKey(cwd, this.platform);
         // One entry per folder: other spellings of it (from before keys were normalised) are replaced.
         for (const k of Object.keys(file.byDir)) if (dirKey(k, this.platform) === key) delete file.byDir[k];
         file.byDir[key] = { ...conv, updatedAt: now.toISOString() };
         // Keep the file small: only the 50 most recently used directories.
-        const keep = Object.entries(file.byDir).sort((a, b) => b[1].updatedAt.localeCompare(a[1].updatedAt)).slice(0, 50);
-        file.byDir = Object.fromEntries(keep);
-        writeFileAtomic(this.path, JSON.stringify(file, null, 2));
+        const keep = Object.entries(file.byDir).sort((a, b) => updated(b[1]).localeCompare(updated(a[1]))).slice(0, 50);
+        writeFileAtomic(this.path, JSON.stringify({ version: CONVERSATIONS_VERSION, byDir: Object.fromEntries(keep) }, null, 2));
       });
-      return null;
+      return skipped;
     } catch (e) {
       return `Could not save conversation to ${this.path}: ${(e as Error).message}`;
     }

@@ -11,7 +11,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 2 | Security: permission defaults, project-config trust | done |
 | 3 | Command execution | done |
 | 4/5 | Filesystem, paths, checkpoints, undo | done |
-| 6/7 | Persistence, locking, privacy, schema versions | pending |
+| 6/7 | Persistence, locking, privacy, schema versions | done |
 | 8 | Claude process lifecycle, PID safety | pending |
 | 9 | Sessions, rollover, resume | pending |
 | 10/12 | Pipeline state, failure classification, verification, review | pending |
@@ -114,6 +114,32 @@ Concrete bugs fixed:
 Intentionally unchanged: two smart processes in the same folder can still interleave a task in one with `/undo` in the other (each has its own private
 index; there is no cross-process lock on the working tree). Git's own config (`core.fsmonitor`, filters) is the user's and is not overridden.
 
+## Phase 6/7: persistence, locking, privacy, schema versions (done)
+
+Concrete bug fixed (reproduced first): `withFileLock` ran the callback **unlocked** after ~3 s of waiting, and also whenever the lock folder could
+not be created for any non-"busy" reason. New policy (`src/core/store/atomicFile.ts`):
+- `acquireLock` waits up to 5 s; the callback never runs without the lock (`LockError` instead). All stores already turn errors into a message
+  (history, conversations, trust) or ignore them (input history), so a busy lock means "not saved, and you are told", never "saved unprotected".
+- The lock folder holds `owner.json` (pid, host, token, time). Stale = owner on this host no longer running (`process.kill(pid, 0)` → ESRCH), or
+  older than 30 s (also for owner-less locks from older versions or a crash between mkdir and the owner write). A live-looking pid is only overruled
+  by age (pid reuse). A lock from another host is only abandoned by age.
+- Stale removal renames the folder first (atomic; one winner) and checks it is the same folder (inode, mtime, token) it judged stale; a fresh lock
+  moved by mistake is put back. Release only removes a lock whose token is still its own. Residual race documented in the code comment.
+- Windows EPERM/EACCES/EBUSY on mkdir stay "busy" (deleting folder), now bounded by the wait.
+- `writeFileAtomic`: `wx` temp file with mode 0600, `fsync` before rename, rename retried on Windows sharing errors, temp removed on failure.
+
+Privacy: history/conversations/trust/limits/input history are written 0600 (existing files get the mode on their next save), lock owner files 0600,
+the debug log 0600 in a 0700 folder; the debug log never contains prompts (timings and error tails only). Checkpoint temp folders come from `mkdtemp` (0700).
+
+Schema (`src/core/store/schema.ts`): `readVersioned` handles current / older (migrations table, one step at a time, written back by the next atomic
+save) / newer (read best-effort, **never written**, saves return "written by a newer version of smart") / invalid (quarantined). Inspecting git history
+showed `history.json` and `conversations.json` have only ever been version 1, so both migration tables are empty (no fabricated migrations); the
+mechanism is tested with test-only migrations. Per-record validation: damaged history records are skipped when reading but kept in the file;
+damaged conversation tasks, undo entries and `/resume` plans are dropped individually. `limits.json` and `input-history.json` stay unversioned
+caches (validated on read, rewritten often). The trust file refuses to overwrite a format it does not know.
+
+New optional record fields (additive, no version bump): `TaskRecord.project`, `StepRecord.failure` (filled in by later phases), `UndoEntry.repo/prefix`.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -128,6 +154,8 @@ index; there is no cross-process lock on the working tree). Git's own config (`c
   `src/core/checkpoint.ts`, `src/core/files.ts`, `src/core/verifier.ts`, `src/cli.tsx`.
 - Phase 4/5: `src/core/paths.ts` (new), `src/core/runner.ts`, `src/core/mentions.ts`, `src/core/checkpoint.ts`, `src/core/pipeline/changes.ts`,
   `src/core/pipeline.ts`, `src/core/store/conversation.ts`, `src/ui/commands.ts`, `src/ui/App.tsx`.
+- Phase 6/7: `src/core/store/atomicFile.ts`, `src/core/store/schema.ts` (new), `src/core/store/tracker.ts`, `src/core/store/conversation.ts`,
+  `src/core/store/trust.ts`, `src/core/store/limits.ts`, `src/core/claude.ts` (debug log mode).
 
 ## Tests added or changed
 
@@ -143,6 +171,10 @@ index; there is no cross-process lock on the working tree). Git's own config (`c
   `test/core/checkpoint.test.ts` (+6: delete through a linked folder refused, link removed not its target, git replaces a linked folder,
   rename undo, monorepo scope, failed git → null); `test/core/quality.test.ts` (+2: later-edit refusal and `/undo force`, foreign repo entry);
   `test/ui/state.test.ts` (`/undo force`). Result: 654 passed, 1 skipped.
+- Phase 6/7: `test/core/atomicFile.test.ts` (+10: live holder blocks and the callback does not run, dead owner taken over, foreign host waited for,
+  owner-less lock by age, uncreatable lock folder, release safety, owner record, stores report a held lock, 0600 files, temp cleanup);
+  new `test/core/schema.test.ts` (14: version handling, 0.3 files, damaged records, newer files never written, quarantine, pending validation,
+  missing `updatedAt`, limits cache, foreign trust file). The 4-process concurrent writer test passes repeatedly. Result: 678 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

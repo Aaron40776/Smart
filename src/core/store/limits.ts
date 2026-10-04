@@ -10,8 +10,10 @@ export class LimitsStore {
     try {
       if (!existsSync(this.path)) return null;
       const d = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<Limits>;
-      if (!d || typeof d.at !== 'number' || typeof d.windows !== 'object' || d.windows === null) return null;
-      return { windows: d.windows, status: d.status, at: d.at };
+      if (!d || typeof d.at !== 'number' || typeof d.windows !== 'object' || d.windows === null || Array.isArray(d.windows)) return null;
+      // A cache, rewritten after every call: entries this version does not understand are simply left out.
+      const windows = Object.fromEntries(Object.entries(d.windows).filter(([, w]) => typeof w?.utilization === 'number' && Number.isFinite(w.utilization) && (w.resetsAt === undefined || typeof w.resetsAt === 'number')));
+      return { windows, status: typeof d.status === 'string' ? d.status : undefined, at: d.at };
     } catch {
       return null;
     }

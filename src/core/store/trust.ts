@@ -37,15 +37,16 @@ export class TrustStore implements TrustCheck {
     private readonly platform: NodeJS.Platform = process.platform,
   ) {}
 
-  private read(): TrustFile {
+  /** `foreign`: the file exists but is not a version-1 trust file this smart understands (a newer smart's, or damaged). */
+  private read(): TrustFile & { foreign?: boolean } {
     if (!existsSync(this.path)) return { version: 1, projects: {} };
     try {
       const d = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<TrustFile>;
       // An unreadable or unknown-format trust file trusts nothing: failing closed is the safe direction here.
-      if (d.version !== 1 || typeof d.projects !== 'object' || d.projects === null) return { version: 1, projects: {} };
+      if (d.version !== 1 || typeof d.projects !== 'object' || d.projects === null || Array.isArray(d.projects)) return { version: 1, projects: {}, foreign: true };
       return { version: 1, projects: d.projects };
     } catch {
-      return { version: 1, projects: {} };
+      return { version: 1, projects: {}, foreign: true };
     }
   }
 
@@ -79,12 +80,17 @@ export class TrustStore implements TrustCheck {
 
   private update(change: (projects: Record<string, TrustRecord>) => void): string | null {
     try {
+      let refused: string | null = null;
       withFileLock(this.path, () => {
         const file = this.read();
+        if (file.foreign) {
+          refused = `${this.path} is not a trust file this version of smart understands; it is left unchanged. Move it aside or run \`smart update\`.`;
+          return;
+        }
         change(file.projects);
-        writeFileAtomic(this.path, JSON.stringify(file, null, 2));
+        writeFileAtomic(this.path, JSON.stringify({ version: 1, projects: file.projects } satisfies TrustFile, null, 2));
       });
-      return null;
+      return refused;
     } catch (e) {
       return `Could not save ${this.path}: ${(e as Error).message}`;
     }

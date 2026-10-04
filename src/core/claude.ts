@@ -394,8 +394,9 @@ export function writeDebug(entry: object): void {
   if (!process.env.SMART_DEBUG) return;
   try {
     const file = process.env.SMART_DEBUG_FILE || `${os.homedir()}/.smart/debug.log`;
-    mkdirSync(file.replace(/[\\/][^\\/]*$/, '') || '.', { recursive: true });
-    appendFileSync(file, `${JSON.stringify({ time: new Date().toISOString(), ...entry })}\n`);
+    mkdirSync(file.replace(/[\\/][^\\/]*$/, '') || '.', { recursive: true, mode: 0o700 });
+    // Timings and error tails only, never prompts; still owner-only like the other files under ~/.smart.
+    appendFileSync(file, `${JSON.stringify({ time: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 });
   } catch {
     /* diagnostics must never break a run */
   }
