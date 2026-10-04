@@ -34,6 +34,8 @@ export interface UiState {
   session: Usage;
   sessionAtTaskStart: Usage;
   ok?: boolean;
+  /** Why the last task did not finish (a failure or error kind; `cancelled`), for the exit code of a one-shot run. */
+  failure?: string;
   taskStartedAt?: number;
   stepStartedAt: Record<string, number>;
   /** Wall time of finished steps, in ms. */
@@ -92,7 +94,7 @@ export function reduce(s: UiState, e: UiAction): UiState {
       return push(
         {
           ...s, phase: 'running', prompt: e.prompt, dryRun: e.dryRun, stages: initialStages(), classification: undefined, classifyReason: undefined,
-          plan: undefined, routes: {}, stepStatus: {}, stepAttempt: {}, escalatedTo: {}, currentStepId: undefined, ok: undefined,
+          plan: undefined, routes: {}, stepStatus: {}, stepAttempt: {}, escalatedTo: {}, currentStepId: undefined, ok: undefined, failure: undefined,
           sessionAtTaskStart: s.session, taskStartedAt: e.at, stepStartedAt: {}, stepDuration: {},
         },
         'info', e.dryRun ? 'Dry run: classify and plan only, nothing will execute.' : 'Task started.',
@@ -169,15 +171,15 @@ export function reduce(s: UiState, e: UiAction): UiState {
         e.error === 'Cancelled' ? 'warn' : 'error', e.error === 'Cancelled' ? 'Step cancelled.' : `Step failed: ${e.error}`, e.stepId,
       );
     case 'task:done':
-      return push({ ...s, phase: 'finished', ok: e.ok }, e.ok ? 'info' : 'error', `${e.ok ? '✓ Done' : '✗ Task did not complete'}${summaryTail(s, e)}`);
+      return push({ ...s, phase: 'finished', ok: e.ok, failure: e.ok ? undefined : (e.failure ?? 'model') }, e.ok ? 'info' : 'error', `${e.ok ? '✓ Done' : '✗ Task did not complete'}${summaryTail(s, e)}`);
     case 'limits':
       return { ...s, limits: e.limits };
     case 'conversation':
       return { ...s, chatTasks: e.tasks };
     case 'task:cancelled':
-      return push({ ...s, phase: 'finished', ok: false }, 'warn', 'Cancelled.');
+      return push({ ...s, phase: 'finished', ok: false, failure: 'cancelled' }, 'warn', 'Cancelled.');
     case 'error':
-      return push({ ...s, phase: 'finished', ok: false }, 'error', e.hint ? `${e.message}\n${e.hint}` : e.message);
+      return push({ ...s, phase: 'finished', ok: false, failure: e.kind }, 'error', e.hint ? `${e.message}\n${e.hint}` : e.message);
     default:
       return s;
   }

@@ -21,6 +21,7 @@ import { StatsView } from './components/StatsView.js';
 import { CLEAR_PROGRESS, progressFor, progressSequence } from './progress.js';
 import { initialState, reduce, taskUsage } from './state.js';
 import { ACCENT } from './theme.js';
+import { EXIT, exitCodeFor } from '../exitCodes.js';
 
 type Focus = 'input' | 'plan' | 'output';
 
@@ -57,7 +58,8 @@ export interface AppProps {
   oneShot?: boolean;
   /** Where to send terminal control sequences (taskbar progress). Omit to send none. */
   terminal?: { write: (s: string) => void };
-  onExit?: (ok: boolean) => void;
+  /** One-shot mode and quitting: the process exit code (see src/exitCodes.ts). */
+  onExit?: (code: number) => void;
 }
 
 const clipPrompt = (p: string): string => {
@@ -131,13 +133,13 @@ export function App({ pipeline, bus, tracker, trackerPath, cwd, version, initial
   useEffect(() => {
     if (oneShot && state.phase === 'finished') {
       const t = setTimeout(() => {
-        onExit?.(Boolean(state.ok));
+        onExit?.(state.ok ? EXIT.ok : exitCodeFor(state.failure, false));
         exit();
       }, 150);
       return () => clearTimeout(t);
     }
     return undefined;
-  }, [oneShot, state.phase, state.ok, exit, onExit]);
+  }, [oneShot, state.phase, state.ok, state.failure, exit, onExit]);
 
   // Read the history once when /stats opens (and again when a task ends), not on every frame.
   const statsSummary = useMemo(() => (view === 'stats' ? summarize(tracker.load(), { now: Date.now() }) : null), [view, tracker, state.phase]);
@@ -168,7 +170,7 @@ export function App({ pipeline, bus, tracker, trackerPath, cwd, version, initial
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
       pipeline.cancel();
-      onExit?.(false);
+      onExit?.(EXIT.cancelled);
       exit();
       return;
     }
@@ -223,7 +225,7 @@ export function App({ pipeline, bus, tracker, trackerPath, cwd, version, initial
         return dispatch({ type: 'ui:info', text: HELP_TEXT });
       case 'quit':
         pipeline.cancel();
-        onExit?.(true);
+        onExit?.(EXIT.ok);
         return exit();
       case 'new':
         if (pipeline.isRunning) return dispatch({ type: 'notice', level: 'warn', message: 'Cancel the running task (Esc) before starting a new conversation.' });

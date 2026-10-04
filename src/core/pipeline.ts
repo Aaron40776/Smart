@@ -203,7 +203,7 @@ export class Pipeline {
   /** Continue the last failed or cancelled task from its first unfinished step. */
   resumeTask(opts: Omit<TaskOptions, 'resume'> = {}): Promise<TaskSummary> {
     const pending = this.conv.pending;
-    if (!pending) throw new SmartError('internal', 'Nothing to resume: the last task finished or never got past planning.');
+    if (!pending) throw new SmartError('resume', 'Nothing to resume: the last task finished or never got past planning.');
     return this.runTask(pending.prompt, { ...opts, resume: true, autoApprove: true });
   }
 

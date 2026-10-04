@@ -232,7 +232,7 @@ describe('App', () => {
     const onExit = vi.fn();
     render(<App {...makeApp({ complexity: 'trivial' })} initial={{ prompt: 'quick question' }} oneShot onExit={onExit} />);
     await waitFor(() => onExit.mock.calls.length === 1, 4000);
-    expect(onExit).toHaveBeenCalledWith(true);
+    expect(onExit).toHaveBeenCalledWith(0);
   });
 
   it('one-shot mode reports failure', async () => {
@@ -245,7 +245,7 @@ describe('App', () => {
     await waitFor(() => lastFrame()!.includes('Run `claude` to log in'), 4000);
     expect(lastFrame()).toContain('not logged in');
     await waitFor(() => onExit.mock.calls.length === 1, 4000);
-    expect(onExit).toHaveBeenCalledWith(false);
+    expect(onExit).toHaveBeenCalledWith(3); // the same exit code as `smart -p`: Claude Code not available
   });
 
   it('Tab moves focus between panels', async () => {

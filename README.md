@@ -38,6 +38,22 @@ smart init                         # write a starter smart.config.json (--global
 smart trust                        # allow this project's smart.config.json to run commands / loosen settings (--remove)
 ```
 
+**Scripts and CI** (`-p`): progress and warnings go to stderr, the reply to stdout. With `--output-format json`, stdout holds exactly one JSON
+document, also when smart fails before a task starts: `ok`, `cancelled`, `steps` (model, attempts, outcome), `changes`, `reply`, `usage`
+(cost and tokens as Claude Code reported them), `failure` (`kind`: `verify`, `review`, `model`, `timeout`, `environment`, `budget`, `limit`, `auth`,
+`config`, ...; `message`; `step`) and `exitCode`. Exit codes, the same for `smart "task"`:
+
+| code | meaning |
+| --- | --- |
+| 0 | done (a dry run that planned counts) |
+| 1 | the task did not finish (a check or review failed, Claude Code reported an error, a check could not run) |
+| 2 | invalid option, argument or config file |
+| 3 | Claude Code is not installed or not logged in |
+| 4 | the task budget was reached |
+| 5 | usage limit reached or Anthropic's API overloaded: try again later (`--resume`) |
+| 6 | `--resume` with nothing to resume |
+| 130 | cancelled (143 / 129 when ended by SIGTERM / SIGHUP) |
+
 In the app: `Enter` sends, `Esc` cancels, `Tab` switches panel, `@path` adds a file and `@folder/` its file list (Tab completes), `\`+`Enter` starts a new line, `↑` recalls earlier prompts.
 Replies appear as they are written. In Windows Terminal the tab and taskbar button show progress: steps done, yellow while a plan waits for you, red if a task failed.
 While a task runs you can type the next one: `Enter` queues it and it starts when the current task completes (`/usage`, `/cost`, `/diff` work meanwhile).

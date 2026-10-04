@@ -18,7 +18,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 11 | Planner and context robustness | done |
 | 13/14 | Routing benchmark, `--rate` diagnostics | done |
 | 15/16 | Learning robustness, cost accounting | done |
-| 17 | CLI, JSON, exit codes | pending |
+| 17 | CLI, JSON, exit codes | done |
 | 18 | TUI | pending |
 | 19 | Installer and updater | pending |
 | 20 | CI, package, release hygiene | pending |
@@ -260,6 +260,27 @@ and classifier/planner/reviewer calls were checked. Fix: a failed classify/plan/
 fallback (two real failed calls, two charges). Estimates stay labelled "≈ … if every step passes first time" and "(rough)"; reported costs come
 from Claude Code.
 
+## Phase 17: CLI, JSON and exit-code contract (done)
+
+`src/exitCodes.ts` defines the contract (README table, `--help` footer): 0 done, 1 did not finish, 2 invalid usage/config, 3 Claude Code
+missing or not logged in, 4 budget, 5 usage limit / overloaded (try later), 6 nothing to resume, 130 cancelled, 143/129 SIGTERM/SIGHUP.
+`exitCodeFor(kind)` maps a `TaskFailure.kind` or `SmartError.kind`; print mode, the CLI's early errors and the one-shot TUI all use it, so
+`smart "task"` and `smart -p` exit the same way.
+
+Fixes:
+- Invalid options exited 1 (indistinguishable from a failed task); now 2 via commander `exitOverride` (help/version stay 0).
+- `--resume` with nothing pending crashed out of `runPrint` with a text error and no JSON; now exit 6 and a JSON error document.
+- With `-p --output-format json`, errors before the task (bad config, Claude Code missing, bad options) printed only to stderr and left stdout
+  empty; now stdout always holds one JSON document (`errorDocument`).
+- `--output-format`/`--verbose` without `-p` were silently ignored; now a usage error.
+- JSON adds `failure {kind, message, step}`, `exitCode`, `usage.cacheCreationTokens`; `error` is filled for every failure (it was null for
+  failures that emitted no `error` event).
+- Auth failures inside a task exit 3 (were 1).
+- The TUI's `onExit` passes an exit code instead of a boolean.
+
+Verified with the built `dist/cli.js` and the fake Claude: unknown option (2, JSON doc), format without `-p` (2), bad config (2, JSON), nothing to
+resume (6, JSON), missing Claude (3, JSON), success (0, stdout is only the JSON document), `--version`/`--help` (0).
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -286,6 +307,8 @@ from Claude Code.
   `src/cli.tsx`, `src/core/usage.ts`, `src/core/pipeline/session.ts`, `src/core/pipeline.ts`, `src/core/types.ts` (comment), `ROUTING.md`, `CONTRIBUTING.md`.
 - Phase 15/16: `src/core/rating/learn.ts`, `src/core/store/tracker.ts` (`projectKey`, `environmentRetries`), `src/core/pipeline.ts`,
   `src/core/pipeline/calls.ts`, `src/cli.tsx`, `ROUTING.md`.
+- Phase 17: `src/exitCodes.ts` (new), `src/print.ts`, `src/cli.tsx`, `src/ui/App.tsx`, `src/ui/state.ts`, `src/core/errors.ts` (`resume` kind),
+  `src/core/pipeline.ts`, `README.md`.
 
 ## Tests added or changed
 
@@ -316,6 +339,8 @@ from Claude Code.
 - Phase 13/14: new `test/bench.test.ts` (4); `test/rate.test.ts` (+4: keyword override, confidence wording, limit and warm-cache rules,
   learning note); `test/core/rating-fixes.test.ts` (2 updated for the new output). Result: 723 passed, 1 skipped.
 - Phase 15/16: new `test/core/learning.test.ts` (8) and `test/core/accounting.test.ts` (2). Result: 733 passed, 1 skipped.
+- Phase 17: new `test/exitCodes.test.ts` (2); `test/print.test.ts` (auth → 3, +4: failure kind and pure-JSON stdout, limit 5 / budget 4,
+  nothing to resume 6 with JSON, success fields); `test/ui/app.test.tsx` (one-shot exit codes). Result: 739 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

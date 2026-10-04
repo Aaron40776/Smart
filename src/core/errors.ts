@@ -1,4 +1,4 @@
-export type ErrorKind = 'cli_missing' | 'auth' | 'limit' | 'overloaded' | 'cancelled' | 'parse' | 'claude' | 'config' | 'internal';
+export type ErrorKind = 'cli_missing' | 'auth' | 'limit' | 'overloaded' | 'cancelled' | 'parse' | 'claude' | 'config' | 'resume' | 'internal';
 
 export class SmartError extends Error {
   /** Spend of a call that ended in an error (it still cost money), so budgets and totals stay honest. */

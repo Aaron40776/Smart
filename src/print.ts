@@ -3,6 +3,8 @@ import type { Pipeline } from './core/pipeline.js';
 import { formatEstimate } from './core/rating/estimate.js';
 import { forTerminal } from './core/text.js';
 import type { Plan, RouteDecision, Usage } from './core/types.js';
+import { SmartError } from './core/errors.js';
+import { EXIT, exitCodeFor } from './exitCodes.js';
 
 export interface PrintOptions {
   format: 'text' | 'json';
@@ -31,10 +33,14 @@ interface StepInfo {
 const money = (n: number): string => `$${n.toFixed(n >= 1 ? 2 : 3)}`;
 const secs = (ms: number): string => `${Math.max(0, Math.round(ms / 1000))}s`;
 
+/** The JSON document for an error before or instead of a task (bad config, Claude Code missing, nothing to resume). */
+export function errorDocument(kind: string, message: string, hint?: string): string {
+  return `${JSON.stringify({ ok: false, cancelled: false, error: hint ? `${message} ${hint}` : message, failure: { kind, message }, exitCode: exitCodeFor(kind, false) }, null, 2)}\n`;
+}
+
 /**
  * Headless mode: no TUI, works in pipes and CI. Progress goes to stderr, the final reply to stdout
- * (or one JSON document with `format: 'json'`). Returns the process exit code:
- * 0 done, 1 failed, 130 cancelled.
+ * (or one JSON document with `format: 'json'`, and nothing else on stdout). Returns the process exit code (see exitCodes.ts).
  */
 export async function runPrint(pipeline: Pipeline, bus: EventBus, prompt: string, opts: PrintOptions, io: PrintIO): Promise<number> {
   const steps = new Map<string, StepInfo>();
@@ -131,13 +137,19 @@ export async function runPrint(pipeline: Pipeline, bus: EventBus, prompt: string
   let summary;
   try {
     summary = opts.resume ? await pipeline.resumeTask() : await pipeline.runTask(prompt, { dryRun: opts.dryRun, noPlan: opts.noPlan, autoApprove: true });
+  } catch (e) {
+    // Thrown before any task ran (nothing to resume, another task running): still one well-formed answer.
+    const err = e instanceof SmartError ? e : new SmartError('internal', (e as Error)?.message ?? String(e));
+    if (opts.format === 'json') io.out.write(errorDocument(err.kind, err.message, err.hint));
+    else log(`error: ${err.message}${err.hint ? ` ${err.hint}` : ''}`);
+    return exitCodeFor(err.kind, false);
   } finally {
     unsubscribe();
     process.off('SIGINT', onSigint);
   }
 
   const cost = summary.totals.costUsd;
-  const code = summary.cancelled ? 130 : summary.ok ? 0 : 1;
+  const code = summary.cancelled ? EXIT.cancelled : exitCodeFor(summary.failure?.kind, summary.ok);
   const reply = pipeline.lastReplyText;
 
   if (opts.format === 'json') {
@@ -152,8 +164,10 @@ export async function runPrint(pipeline: Pipeline, bus: EventBus, prompt: string
           steps: [...steps.values()].map((s) => ({ id: s.id, title: s.title, model: s.model, reason: s.reason ?? routes[s.id]?.reason, attempts: s.attempts, outcome: s.outcome })),
           changes: changes ?? null,
           reply: opts.dryRun ? null : reply,
-          error: errorMessage ?? null,
-          usage: { costUsd: cost, inputTokens: summary.totals.inputTokens, outputTokens: summary.totals.outputTokens, cacheReadTokens: summary.totals.cacheReadTokens },
+          error: errorMessage ?? (summary.ok ? null : summary.failure?.message ?? null),
+          failure: summary.failure ? { kind: summary.failure.kind, message: summary.failure.message, step: summary.failure.stepId ?? null } : null,
+          exitCode: code,
+          usage: { costUsd: cost, inputTokens: summary.totals.inputTokens, outputTokens: summary.totals.outputTokens, cacheReadTokens: summary.totals.cacheReadTokens, cacheCreationTokens: summary.totals.cacheCreationTokens },
           durationMs: Date.now() - startedAt,
         },
         null,
@@ -172,6 +186,6 @@ export async function runPrint(pipeline: Pipeline, bus: EventBus, prompt: string
     const clean = forTerminal(reply);
     io.out.write(clean.endsWith('\n') ? clean : `${clean}\n`);
   }
-  log(`${code === 0 ? 'done' : code === 130 ? 'cancelled' : 'failed'} in ${secs(Date.now() - startedAt)}${cost > 0 ? ` · ${money(cost)}` : ''}${totals ? '' : ''}`);
+  log(`${code === EXIT.ok ? 'done' : code === EXIT.cancelled ? 'cancelled' : `failed${summary.failure ? ` (${summary.failure.kind})` : ''}`} in ${secs(Date.now() - startedAt)}${cost > 0 ? ` · ${money(cost)}` : ''}${totals ? '' : ''}`);
   return code;
 }
