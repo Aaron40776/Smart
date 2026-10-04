@@ -11,7 +11,7 @@ import { claudeProjectSettingsWarning } from './core/claudeSettings.js';
 import { classifierCall } from './core/classifier.js';
 import { expandHome, globalConfigPath, loadConfig } from './core/config.js';
 import { EventBus } from './core/events.js';
-import { SmartError } from './core/errors.js';
+import { cliMissing, SmartError } from './core/errors.js';
 import { createCheckpoints } from './core/checkpoint.js';
 import { ConversationStore, newConversation } from './core/store/conversation.js';
 import { InputHistory } from './core/store/inputHistory.js';
@@ -53,6 +53,22 @@ const fail = (message: string, hint?: string, kind = 'internal'): never => {
   if (jsonOutput) process.stdout.write(errorDocument(kind, message, hint));
   process.exit(exitCodeFor(kind, false));
 };
+
+/** Shown after the options in `smart --help`: the commands handled before option parsing, the environment, the exit codes. */
+const HELP_AFTER = `
+Commands (each on its own: \`smart init the repo\` is a task):
+  smart init [--global] [--force]  write a starter smart.config.json (--global: ~/.smart, for all projects)
+  smart trust [--remove]           allow this folder's smart.config.json to run commands or loosen settings
+  smart update [--stash]           update an install.ps1 installation (fast-forward, install, build)
+
+Environment:
+  SMART_CLAUDE_BIN  full path to the claude executable, when it is not on PATH
+  SMART_DEBUG=1     log per-call timings to ~/.smart/debug.log
+
+Exit codes: 0 done, 1 task did not finish, 2 invalid usage or config, 3 Claude Code missing or not logged in,
+4 budget reached, 5 usage limit or API overloaded (try later), 6 nothing to resume, 130 cancelled.
+
+Docs: https://github.com/Aaron40776/Smart#readme`;
 
 interface Options {
   dryRun?: boolean;
@@ -131,7 +147,7 @@ async function main() {
     .option('--verbose', 'with --print: also stream tool calls to stderr')
     .option('--budget <usd>', 'stop a task once it has cost this many dollars', parseBudget)
     .option('--no-review', 'skip the acceptance review after each step')
-    .addHelpText('after', '\nExit codes: 0 done, 1 task did not finish, 2 invalid usage or config, 3 Claude Code missing or not logged in,\n4 budget reached, 5 usage limit or API overloaded (try later), 6 nothing to resume, 130 cancelled.')
+    .addHelpText('after', HELP_AFTER)
     // Invalid options are a usage error (2); help and --version are a success. Commander has already printed the message.
     .exitOverride((err) => {
       if (err.code === 'commander.helpDisplayed' || err.code === 'commander.version' || err.code === 'commander.help') process.exit(EXIT.ok);
@@ -163,6 +179,8 @@ async function main() {
 
   if (opts.rate) {
     if (!task) return fail('give the task to rate: smart --rate "fix the race condition in worker.js"', undefined, 'config');
+    // The rating depends on the config, so say when parts of it were ignored (a typo, an untrusted project file).
+    for (const w of configWarnings) process.stderr.write(`smart: warning: ${w}\n`);
     const tracker = new Tracker(expandHome(config.trackerPath));
     const ctx = {
       history: buildHistory(tracker.load(), Date.now(), { topTier: config.escalation.ladder.at(-1) }),
@@ -176,7 +194,7 @@ async function main() {
   const claude = resolveClaudeCommand();
   // Probed from the home folder: never let a `claude` in the project folder answer for the real one (see core/which.ts).
   if (claude.missing || spawnSync(claude.cmd, [...claude.prefix, '--version'], { stdio: 'ignore', cwd: homedir(), windowsHide: true }).error) {
-    const err = new SmartError('cli_missing', 'The `claude` CLI was not found on your PATH.', 'Install Claude Code (https://docs.claude.com/claude-code), then run `claude` once to log in.');
+    const err = cliMissing();
     return fail(err.message, err.hint, err.kind);
   }
   const interactive = process.stdin.isTTY && process.stdout.isTTY;
@@ -268,7 +286,8 @@ async function main() {
         exitCode = code;
       }}
     />,
-    // A modest fps cap keeps spinners from redrawing constantly. incrementalRendering is opt-in (SMART_INCREMENTAL=1): see README.
+    // A modest fps cap keeps spinners from redrawing constantly. Ink's incremental rendering is an undocumented opt-in
+    // (SMART_INCREMENTAL=1) for experimenting with redraw cost; it is off by default.
     { exitOnCtrlC: false, incrementalRendering: process.env.SMART_INCREMENTAL === '1', maxFps: 12 },
   );
   await app.waitUntilExit();

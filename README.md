@@ -1,58 +1,155 @@
 # Smart
 
 [![CI](https://github.com/Aaron40776/Smart/actions/workflows/ci.yml/badge.svg)](https://github.com/Aaron40776/Smart/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Claude Code, routed to the cheapest model that can do each step well.**
 
-Type a task. `smart` classifies it with Haiku, answers simple questions on the spot, plans big builds with Opus, runs each step on the cheapest capable model (Sonnet by default),
-checks the result with your tests and a quick review, and escalates to a stronger model only when a step fails. It is a full-screen terminal UI around [Claude Code](https://docs.claude.com/claude-code),
-with the same follow-up context, and shows what everything costs.
+`smart` is a full-screen terminal UI (and a headless CLI) around [Claude Code](https://code.claude.com/docs/en/overview). You type a task
+as you would in Claude Code; `smart` decides which Claude model and how much thinking effort each part of it needs, runs it through
+Claude Code, checks the result, and moves to a stronger model only when a step fails. It shows what every call costs.
+
+## Why
+
+Running Claude Code on one fixed model means paying Opus prices for typo fixes, or getting Sonnet results on a concurrency bug.
+`smart` makes that choice per task and per step. Typical outcomes with the default settings:
+
+| You type | What `smart` does |
+| --- | --- |
+| `hey` | one short Haiku call, no coding session |
+| `what does a mutex do?` | answered by the classifier call itself (Haiku), or one tool-free call on a stronger model if it is harder |
+| `fix the typo in the README` | recognised locally, no classifier call; Sonnet at low effort; your checks; done |
+| `add dark mode to the settings page` | classified; if it needs several steps, planned by Sonnet; each step rated, run, checked and reviewed |
+| `build a REST API with auth and tests` | planned by Opus, steps routed individually (scaffolding on Sonnet, the hard parts on Opus) |
+
+Follow-ups continue the same Claude Code session, so "now make it red" has the real history and the prompt cache.
+
+It is for developers who already use Claude Code and want lower usage without hand-picking `--model` for every task.
+
+## How routing works
+
+```mermaid
+flowchart LR
+    A[Your task] --> B{Classify<br/>Haiku, or skipped<br/>for routine edits}
+    B -->|simple question| C[Answer<br/>no coding session]
+    B -->|needs a plan| D[Plan<br/>Opus or Sonnet]
+    B -->|single step| E
+    D --> E[Rate each step<br/>model + effort]
+    E --> F[Run in Claude Code]
+    F --> G{Checks + review}
+    G -->|pass| H[Done]
+    G -->|fail| I[Retry with more effort,<br/>then next model up]
+    I --> F
+```
+
+1. **Classify.** A cheap model (Haiku) sorts the task by size and difficulty. Routine one-line edits skip this call.
+2. **Plan**, only for multi-part work: Opus for big or hard builds, Sonnet for mid-size changes.
+3. **Rate.** Each step gets a 0–1 difficulty score from local text signals, the classifier's opinion and the planner's rating of
+   that step. The score picks a rung on a cost ladder: Haiku → Sonnet (low, medium, high effort) → Opus (medium, high, xhigh).
+   The rating also learns from which rungs passed first time in your own history.
+4. **Run** the step in Claude Code, then **check** it: your project's `typecheck`, `lint`, `build` and `test` scripts, and a
+   short review by a cheap model against the step's acceptance criteria.
+5. **Escalate** on failure: one retry with more effort, then the next model up. Failures that are not the model's fault (a check
+   that cannot run, a usage limit, an overloaded API) stop or wait instead of escalating.
+
+`smart --rate "your task"` shows the decision and the reasons without calling a model. The full algorithm, its numbers and
+every setting that tunes it: **[ROUTING.md](ROUTING.md)**.
+
+## Requirements
+
+| | |
+| --- | --- |
+| OS | **Windows 10 or 11** (supported, tested in CI). Linux and macOS are not supported: the test suite also runs on Linux, but the installer, updater and docs are Windows-only and nothing else is tested there. |
+| Node.js | 22 or newer (CI tests Node.js 22 and 24) |
+| Git | needed by the installer and for `/undo` and `/diff` |
+| Claude Code | the [`claude` CLI](https://code.claude.com/docs/en/overview), logged in (run `claude` once) |
 
 ## Install
 
-For **Windows 10 and 11**. Needs [Git](https://git-scm.com/download/win), Node.js 22+ and the [Claude Code CLI](https://docs.claude.com/claude-code), logged in (run `claude` once). In PowerShell:
+`smart` is installed from this repository (it is not published to npm). In PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/Aaron40776/Smart/main/install.ps1 | iex
 ```
 
-That clones smart into `%USERPROFILE%\Smart` (`$env:SMART_DIR` picks another folder), installs its dependencies with `npm ci --ignore-scripts` (exactly
-the versions in `package-lock.json`, integrity-checked by npm, with no package install scripts run), builds it and puts `smart` on your `PATH`.
+The installer checks Git, Node.js and Claude Code, clones this repository into `%USERPROFILE%\Smart`, installs the exact dependency versions
+from `package-lock.json` with `npm ci --ignore-scripts` (no package install scripts run), builds, and puts `smart` on your `PATH` with `npm link`.
+Open a new terminal afterwards.
 
-- **Read it first**: `irm https://raw.githubusercontent.com/Aaron40776/Smart/main/install.ps1 -OutFile install.ps1`, read `install.ps1`, then run `.\install.ps1`.
-- **Pin a version**: `$env:SMART_REF = "<tag, branch or commit>"` installs that instead of the latest `main`; a pinned installation is left alone by `smart update`.
-  `$env:SMART_COMMIT = "<full commit id>"` makes the installer stop before running anything unless the code is exactly that commit.
-- **Your changes are safe**: the installer and `smart update` never discard local changes in that folder. They stop and list them; `smart update --stash` sets
-  them aside with `git stash` (`git stash pop` brings them back). Local commits are kept (updates only fast-forward); a clone of another repository is left alone.
-  If installing or building fails after the code moved, `smart update` says which commit you were on and how to return to it.
+- **Read it first** (recommended): `irm https://raw.githubusercontent.com/Aaron40776/Smart/main/install.ps1 -OutFile install.ps1`,
+  read `install.ps1`, then run `.\install.ps1`.
+- **Options** (environment variables): `$env:SMART_DIR` installs to another folder; `$env:SMART_REF = "<tag, branch or commit>"` installs that
+  instead of `main` (a pinned installation is left alone by `smart update`); `$env:SMART_COMMIT = "<full commit id>"` stops before running
+  anything unless the code is exactly that commit.
+- **Your changes are safe**: the installer and `smart update` never discard local changes in that folder. They stop and list them;
+  `smart update --stash` sets them aside with `git stash`. Local commits are kept (updates only fast-forward).
 
-**Update** any time with `smart update`. By hand instead: `git clone https://github.com/Aaron40776/Smart.git`, then in `Smart` run `npm ci --ignore-scripts`, `npm run build` and `npm link`.
-If scripts are blocked, run `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` once.
-If `claude` is not found, set its full path: `$env:SMART_CLAUDE_BIN = "C:\path\to\claude.exe"`.
+**By hand** instead: `git clone https://github.com/Aaron40776/Smart.git`, then in `Smart` run `npm ci --ignore-scripts`, `npm run build`
+and `npm link`.
 
-## Use
+**Update** with `smart update` (fast-forward, install, build).
+
+**Uninstall**: `npm uninstall -g @aaron40776/smart`, then delete the install folder (`%USERPROFILE%\Smart`). Your history, conversations
+and global config are in `%USERPROFILE%\.smart`; delete that folder too if you want them gone.
+
+## Quick start
 
 ```powershell
-smart                              # interactive
+cd C:\path\to\your\project
+smart                              # interactive: type a task, Enter
 smart "make me a snake game"       # one-shot: same UI, exits when done
+smart --rate "fix the race in worker.js"   # which model and effort it would pick, and why (calls no model)
+```
+
+Run it in a git repository: `/undo` and `/diff` need one (`git init` is enough).
+
+## Usage
+
+```powershell
 smart -c                           # continue the last conversation in this directory (--continue)
 smart --resume                     # continue a failed or cancelled task from its first unfinished step
 smart --dry-run "add dark mode"    # show the plan and the model per step, run nothing
-smart --model haiku "fix the typo" # force a tier      (--no-plan skips planning, --budget 1.50 caps the cost)
-smart -p "fix the typo" | cat      # headless (--print): reply on stdout, progress on stderr (--output-format json for scripts, --verbose for tool calls)
-smart --rate "fix the race in worker.js"  # show which model and effort it would pick, and why (calls no model)
-smart --no-review "..."            # skip the acceptance review     (--config ./my.json uses another config file)
-smart update                       # get the latest version (fast-forward, install, build; --stash sets your local changes aside)
+smart --model haiku "fix the typo" # force a tier for every step
+smart --no-plan "..."              # run the task as a single step, without planning
+smart --budget 1.50 "..."          # stop the task once it has cost $1.50
+smart --no-review "..."            # skip the acceptance review
+smart --config .\my.json "..."     # use this config file instead of .\smart.config.json
+smart -p "fix the typo" | cat      # headless (--print): reply on stdout, progress on stderr
+smart -p --output-format json "…"  # headless, one JSON document on stdout (--verbose also streams tool calls to stderr)
 smart init                         # write a starter smart.config.json (--global: %USERPROFILE%\.smart, for all projects)
 smart trust                        # allow this project's smart.config.json to run commands / loosen settings (--remove)
+smart update                       # update an installer installation (--stash sets your local changes aside)
+smart --help                       # all options, commands, environment variables and exit codes
 ```
 
-**Scripts and CI** (`-p`): progress and warnings go to stderr, the reply to stdout. With `--output-format json`, stdout holds exactly one JSON
-document, also when smart fails before a task starts: `ok`, `cancelled`, `steps` (model, attempts, outcome), `changes`, `reply`, `usage`
-(cost and tokens as Claude Code reported them), `failure` (`kind`: `verify`, `review`, `model`, `timeout`, `environment`, `budget`, `limit`, `auth`,
-`config`, ...; `message`; `step`) and `exitCode`. Exit codes, the same for `smart "task"`:
+`init`, `trust` and `update` are commands only as the whole command line: `smart init the repo` runs as a task.
 
-| code | meaning |
+### In the app
+
+`Enter` sends, `Esc` cancels, `Tab` switches panel, `@path` adds a file and `@folder/` its file list (Tab completes), `\`+`Enter` starts a
+new line, `↑` recalls earlier prompts, `PgUp`/`PgDn` scroll the output. Replies stream as they are written. While a task runs, `Enter` queues
+the next one. In Windows Terminal the tab and taskbar button show progress (yellow while a plan waits for you, red if a task failed).
+
+| Command | |
+| --- | --- |
+| `/stats` `/usage` `/cost` | spend history, your 5-hour / 7-day account limits, this session's cost |
+| `/model haiku\|sonnet\|opus\|auto` | force a model, or return to routing; `/dry` toggles dry-run |
+| `/good` `/bad` | rate the last result; `/bad` teaches smart to use a stronger model or more effort for similar work |
+| `/undo` `/diff` `/resume` | revert or show the last task's file changes (needs git; also after a restart), continue an unfinished task |
+| `/mode edits\|plan\|bypass\|default` | permission mode for this session (`plan` is read-only, `default` returns to your config) |
+| `/new` `/config` `/help` `/quit` | fresh conversation, effective settings, help, exit |
+
+**Plan review** (multi-step tasks): `↑↓` select, `Space` skip, `a` add, `d` delete, `J`/`K` move, `m` model, `e`/`i` edit title/instructions,
+`Enter` run, `Esc` cancel. The header estimates the plan's cost from what your own steps on each model and effort have cost.
+
+### Scripts and CI
+
+With `-p`, progress and warnings go to stderr and the reply to stdout. With `--output-format json`, stdout holds exactly one JSON document,
+also when smart fails before a task starts: `ok`, `cancelled`, `steps` (model, attempts, outcome), `changes`, `reply`, `usage` (cost and tokens
+as Claude Code reported them), `failure` (`kind`: `verify`, `review`, `model`, `timeout`, `environment`, `budget`, `limit`, `auth`, `config`, ...;
+`message`; `step`) and `exitCode`.
+
+| Exit code | Meaning (the same for `smart "task"`) |
 | --- | --- |
 | 0 | done (a dry run that planned counts) |
 | 1 | the task did not finish (a check or review failed, Claude Code reported an error, a check could not run) |
@@ -63,59 +160,76 @@ document, also when smart fails before a task starts: `ok`, `cancelled`, `steps`
 | 6 | `--resume` with nothing to resume |
 | 130 | cancelled (143 / 129 when ended by SIGTERM / SIGHUP) |
 
-In the app: `Enter` sends, `Esc` cancels, `Tab` switches panel, `@path` adds a file and `@folder/` its file list (Tab completes), `\`+`Enter` starts a new line, `↑` recalls earlier prompts.
-Replies appear as they are written. In Windows Terminal the tab and taskbar button show progress: steps done, yellow while a plan waits for you, red if a task failed.
-While a task runs you can type the next one: `Enter` queues it and it starts when the current task completes (`/usage`, `/cost`, `/diff` work meanwhile).
+## Configuration
 
-| Command | |
-| --- | --- |
-| `/stats` `/usage` `/cost` | spend history, your 5-hour / 7-day account limits, this session's cost |
-| `/model haiku\|sonnet\|opus\|auto` | force a model; `/dry` toggles dry-run |
-| `/good` `/bad` | rate the last result; `/bad` teaches smart to use a stronger model or more effort for similar work |
-| `/undo` `/diff` `/resume` | revert or show the last task's file changes (needs git; also after a restart), continue an unfinished task |
-| `/mode edits\|plan\|bypass\|default` | permission mode for this session (`plan` is read-only, `default` returns to your config) |
-| `/new` `/config` `/help` `/quit` | fresh conversation, effective settings, help, exit |
+Everything works without a config file. To change something, `smart init` writes a small `.\smart.config.json` and `smart init --global`
+one in `%USERPROFILE%\.smart\` for all your projects. Put in only what you change; a project file applies on top of your global one, key by key.
 
-**Plan review** (big builds): `↑↓` select, `Space` skip, `a` add, `d` delete, `J`/`K` move, `m` model, `e`/`i` edit title/instructions (`←→` `Home` `End` `Ctrl+W` while editing), `Enter` run, `Esc` cancel.
-The header shows what the plan will likely cost, from what your own steps on each model and effort have cost; model badges and the estimate update as you edit.
+```json
+{
+  "routing": { "optimize": "cost", "keywordRules": [{ "match": "auth|payment", "tier": "opus" }] },
+  "limits": { "maxBudgetUsdPerTask": 2 }
+}
+```
 
-## How it saves usage
-
-- A cheap model classifies every task (skipped for routine edits like "fix the typo"); an **easy question is answered by that same call**, a hard one by the model it needs, and "hey" costs one tiny call.
-- **Opus plans, Sonnet builds**: big builds get a short plan from Opus (mid-size ones from Sonnet), then each step runs on the cheapest model and effort its rating allows. A hard step goes to Opus. Docs-only changes skip the test run.
-- **Model and effort come from a rating**, not a fixed table: local signals in your text, the classifier's opinion and, per plan step, the planner's, blended into a score with a confidence. Routine work runs on Sonnet at low effort, hard work on Opus at medium to xhigh. It also learns which rungs worked for you. `smart --rate "your task"` shows the rating and why, for free.
-- Failures **escalate one model at a time**; nothing jumps to Opus by default. Near an account limit, automatic Opus choices drop to Sonnet.
-- Follow-ups reuse one Claude Code session, so "now make it red" has the real history (and Anthropic's prompt cache).
-
-Costs shown are what Claude Code reports. Routing rules and every setting: **[ROUTING.md](ROUTING.md)** and [`smart.config.example.json`](smart.config.example.json).
+Common settings: `routing.optimize` (`cost`, `balanced`, `quality`), the per-complexity floors (`routing.multi_file`, ...),
+`routing.keywordRules`, `limits.maxBudgetUsdPerTask`, `runner.permissionMode`, `verify.commands` (checks for non-JavaScript projects,
+e.g. `["pytest -q"]`) and `models` (aliases or full model IDs passed to `claude --model`). Every setting with its default:
+[`smart.config.example.json`](smart.config.example.json); what each one does: [ROUTING.md](ROUTING.md#tuning).
+Unknown keys are reported as probable typos; an invalid value stops `smart` with the file and setting named.
 
 ## Safety
 
-- **Permissions.** Steps run with `acceptEdits` by default: Claude Code edits files, and runs shell commands only where your own Claude Code permission rules
-  (`permissions.allow` in its settings) allow them. `smart` still runs your checks itself (see below). To let steps run any command unasked, set
-  `"runner": { "permissionMode": "bypassPermissions" }` in your global config; `smart` then warns at startup and shows `bypass` in yellow in the header.
-  `/mode plan` makes a session read-only. Claude Code refuses `bypassPermissions` as root, and `smart` falls back to `acceptEdits`.
-- **Checks run project code.** After a step changes code, `smart` runs the project's `typecheck`, `lint`, `build` and `test` scripts from `package.json`
-  (or your `verify.commands`). In a repository you do not trust, set `"verify": { "auto": false }` in your global config.
-- **A project's `smart.config.json` is not trusted automatically.** Settings in it that would run commands (`verify.commands`), loosen permissions
-  (`runner.permissionMode`, `runner.bare`), pass flags to Claude Code (`runner.extraArgs`), move your history files (`trackerPath`, ...) or lift your budget
-  caps are ignored, with a warning, until you read the file and run `smart trust` in that directory. Trust covers the file's exact contents: if it
-  changes (a pull, another branch), those settings are ignored again. `smart trust --remove` withdraws it. A file you name with `--config` is yours and always applies.
-- **The project's own Claude Code settings still apply.** A `.claude/settings.json` in the repository can define hooks (commands Claude Code runs automatically)
-  and permission rules that let commands run without asking; Claude Code applies them in every step. `smart` names such settings at startup.
-- **Undo.** Run it in a git repository: `/undo` needs one. Details in [ROUTING.md](ROUTING.md#undo-and-safety-net).
+- **Permissions.** Steps run with `acceptEdits` by default: Claude Code edits files, and runs shell commands only where your own Claude Code
+  permission rules (`permissions.allow` in its settings) allow them. To let steps run any command unasked, set
+  `"runner": { "permissionMode": "bypassPermissions" }` in your global config; `smart` then warns at startup and shows `bypass` in yellow
+  in the header. `/mode plan` makes a session read-only. Claude Code refuses `bypassPermissions` as root, and `smart` falls back to `acceptEdits`.
+- **Checks run project code.** After a step changes code, `smart` runs the project's `typecheck`, `lint`, `build` and `test` scripts from
+  `package.json` (or your `verify.commands`). In a repository you do not trust, set `"verify": { "auto": false }` in your global config.
+- **A project's `smart.config.json` is not trusted automatically.** Settings in it that would run commands (`verify.commands`), loosen
+  permissions (`runner.permissionMode`, `runner.bare`), pass flags to Claude Code (`runner.extraArgs`), move your history files
+  (`trackerPath`, ...) or lift your budget caps are ignored, with a warning, until you read the file and run `smart trust` in that directory.
+  Trust covers the file's exact contents: if it changes, those settings are ignored again. A file you name with `--config` is yours and always applies.
+- **The project's own Claude Code settings still apply.** A `.claude/settings.json` in the repository can define hooks and permission rules;
+  Claude Code applies them in every step, and `smart` names such settings at startup.
+- **Undo.** In a git repository, `smart` snapshots the project before and after each step in a private index (your index, branches and history
+  are untouched). `/undo` reverts only the files the task changed and refuses if you have edited them since. Details:
+  [ROUTING.md](ROUTING.md#undo-and-safety-net).
+
+Costs shown are what Claude Code reports.
+
+## Troubleshooting
+
+| Problem | Fix |
+| --- | --- |
+| `smart: The claude CLI was not found` | Install Claude Code and run `claude` once. If it is installed elsewhere: `$env:SMART_CLAUDE_BIN = "C:\path\to\claude.exe"`. |
+| `running scripts is disabled on this system` | Run `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` once. |
+| `smart` is not recognised after installing | Open a new terminal. If it is still missing, check that npm's global folder (`npm prefix -g`) is on your `PATH`. |
+| `smart update` says files have local changes | Commit them, or `smart update --stash` (`git stash pop` brings them back). |
+| `Ignored settings in ...smart.config.json` | The project file is not trusted. Read it, then run `smart trust` in that folder. |
+| A slow-snapshot notice in a big repository | `git config core.fsmonitor true` in that repository. |
+| Calls seem slow | `$env:SMART_DEBUG=1` logs per-call timings (start-up, first text, total) to `%USERPROFILE%\.smart\debug.log`. |
+| Usage limit reached / API overloaded | The task stops and is kept; run `smart --resume` (or `/resume`) later. |
+
+## Documentation
+
+- [ROUTING.md](ROUTING.md): the routing algorithm, escalation, conversations, review, limits, undo, trust and every tuning option
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version
+- [CONTRIBUTING.md](CONTRIBUTING.md): code layout, ground rules, how to contribute
 
 ## Development
 
 ```powershell
-npm install
+git clone https://github.com/Aaron40776/Smart.git
+cd Smart
+npm ci
 npm run check      # lint + typecheck + tests + build (no test calls the real Claude Code)
 npm run dev        # run from source
 npm run bench      # simulated routing benchmark; see ROUTING.md
 ```
 
-Layout and rules: [CONTRIBUTING.md](CONTRIBUTING.md). History: [CHANGELOG.md](CHANGELOG.md). `$env:SMART_DEBUG=1` logs per-call timings to `%USERPROFILE%\.smart\debug.log`; `$env:SMART_E2E=1; npm test -- test/e2e` runs one real Haiku task.
+`$env:SMART_E2E=1; npm test -- test/e2e` runs one real Haiku task (it costs a little). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)

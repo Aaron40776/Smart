@@ -220,7 +220,7 @@ directory came with the repository, so settings in it that cross a trust boundar
 | --- | --- |
 | `verify.commands` | sets commands (they run in a shell) |
 | `verify.auto` | turns automatic checks on when your config turned them off |
-| `runner.permissionMode` | is more permissive than your own (`plan` < `dontAsk` < `acceptEdits` < `auto` < `bypassPermissions`) |
+| `runner.permissionMode` | is more permissive than your own (`plan` < `dontAsk`, `manual` < `acceptEdits` < `auto` < `bypassPermissions`) |
 | `runner.extraArgs` | passes flags to Claude Code |
 | `runner.bare` | turns on `--bare` (which skips your Claude Code hooks and settings) |
 | `limits.maxBudgetUsdPerTask`, `limits.maxBudgetUsdPerStep` | removes or raises a cap you set |

@@ -76,11 +76,11 @@ export function parseInput(raw: string): Command | null {
   }
 }
 
-/** Commands offered by Tab completion and the suggestion line. */
-/** Permission modes you can switch to at runtime. `auto` returns to the configured default. */
+/** Permission modes you can switch to at runtime. `default` (or `auto`) returns to the configured mode. */
 export const MODES: Record<string, string> = { bypass: 'bypassPermissions', edits: 'acceptEdits', accept: 'acceptEdits', plan: 'plan' };
 export const modeLabel = (mode: string): string => Object.entries(MODES).find(([, v]) => v === mode)?.[0] ?? mode;
 
+/** Commands offered by Tab completion and the suggestion line. */
 export const COMMANDS: { name: string; help: string }[] = [
   { name: '/stats', help: 'usage history and spend' },
   { name: '/usage', help: 'account limits (5h / 7d)' },

@@ -4,3 +4,8 @@ coverage/
 *.log
 .smart/
 .DS_Store
+*.tgz
+.env
+.vscode/
+.idea/
+Thumbs.db
