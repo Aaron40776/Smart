@@ -14,7 +14,7 @@ This file is the hand-off record. If work stops part-way, continue from the firs
 | 6/7 | Persistence, locking, privacy, schema versions | done |
 | 8 | Claude process lifecycle, PID safety | done |
 | 9 | Sessions, rollover, resume | done |
-| 10/12 | Pipeline state, failure classification, verification, review | pending |
+| 10/12 | Pipeline state, failure classification, verification, review | done |
 | 11 | Planner and context robustness | pending |
 | 13/14 | Routing benchmark, `--rate` diagnostics | pending |
 | 15/16 | Learning robustness, cost accounting | pending |
@@ -180,6 +180,28 @@ resume after verification failure / process death (claude error), and resume thr
 "A task never appears complete because state was lost": an empty or malformed stored plan is no longer offered for `/resume` (Phase 6/7
 validation), which would otherwise have "finished" with nothing run.
 
+## Phase 10/12: pipeline state, failure classification, verification and review (done)
+
+The state machine is documented at the top of `Pipeline` (task states and the per-step attempt loop). `pipeline.ts` was **not** split further:
+its remaining size is the step loop and `finish`, which share a lot of per-task state; the decision logic that was tangled into the loop was
+extracted instead, as pure functions in `src/core/pipeline/outcome.ts`:
+- `checkFailureKind` (check result → `verify` | `timeout` | `environment`: exit 127/9009 or spawn failure; a signal-killed check stays `verify`),
+- `callFailureKind` (Claude Code error → `environment` when it never produced output, `budget` on `error_max_budget_usd`, else `model`),
+- `afterFailure` (policy: environment from a check → stop at once; Claude Code not starting → one same-model retry without an effort bump,
+  then stop; budget → stop; otherwise the existing ladder / forced-model retries).
+
+Concrete bugs fixed:
+- A verify command that does not exist (`pytest` not installed, missing node_modules → 127) was retried and escalated up to Opus, paying for
+  three or four model attempts that could not succeed. Now one attempt and a message saying what to install, task resumable.
+- A call Claude Code stopped at `--max-budget-usd` was retried (and could escalate) with no budget left.
+- A Claude Code that never started counted as a model failure and bumped effort/escalated.
+- A step aborted by a task-level error (usage limit, auth) was missing from the task summary and history (its spend vanished from per-step stats).
+- A failed call's spend was in the task total but not on the step record.
+
+New data: `StepRecord.failure` (persisted; Phase 15 learning uses it), `TaskSummary.failure {kind, message, stepId}` and `task:done.failure`
+(Phase 17 maps them to JSON and exit codes). Review stays fail-open when the reviewer is unavailable (reported as skipped); when review is
+skipped/upgraded is unchanged (`shouldReview`, `reviewerTier`) and covered by existing tests.
+
 ## Decisions later phases depend on
 
 - `LoadedConfig` has a new `notices` field (info lines; the CLI prints them like warnings but without "warning:").
@@ -199,6 +221,8 @@ validation), which would otherwise have "finished" with nothing run.
 - Phase 8: `src/core/claude.ts`, `src/core/claudeProcess.ts`, `src/core/errors.ts`, `src/core/config.ts` (`runner.startupTimeoutSec`),
   `src/core/pipeline/calls.ts`, `smart.config.example.json`, `ROUTING.md`, `test/fixtures/fake-claude-stream.mjs` (`FAKE_DIE_TURN`).
 - Phase 9: `src/core/pipeline.ts`, `src/core/store/conversation.ts` (`PendingTask.files`).
+- Phase 10/12: `src/core/pipeline/outcome.ts` (new), `src/core/pipeline.ts`, `src/core/verifier.ts` (exit details, spawn failure),
+  `src/core/events.ts` (`task:done.failure`), `src/core/store/tracker.ts` (`FailureKind`).
 
 ## Tests added or changed
 
@@ -222,6 +246,8 @@ validation), which would otherwise have "finished" with nothing run.
   switch, per-session serialization, failed call does not block, mid-message death), `test/core/spares.test.ts` (+2 dead spares).
   Result: 688 passed, 1 skipped.
 - Phase 9: `test/core/resume.test.ts` (+6 session/resume scenarios). Result: 694 passed, 1 skipped.
+- Phase 10/12: new `test/core/outcome.test.ts` (11: kind classification, policy, and pipeline runs for missing command, real test failure,
+  review failure, Claude Code not starting, timeout, budget (both kinds), limit, cancel, success). Result: 705 passed, 1 skipped.
 
 ## Unresolved / intentionally unchanged
 

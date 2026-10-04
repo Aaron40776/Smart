@@ -22,12 +22,13 @@ import { gatherFiles, runStep } from './runner.js';
 import type { StepRecord, TaskRecord, Tracker } from './store/tracker.js';
 import { addUsage, emptyUsage, type Classification, type Limits, type ModelTier, type Plan, type PlanStep, type RouteDecision, type Usage } from './types.js';
 import { LimitsStore } from './store/limits.js';
-import { detectChecks, isDocsOnly, nextAttempt, runChecks, type Check, type ExecFn } from './verifier.js';
+import { detectChecks, isDocsOnly, runChecks, type Check, type ExecFn } from './verifier.js';
 import { makeRun } from './pipeline/calls.js';
 import { ChangeTracker } from './pipeline/changes.js';
 import { AccountLimits } from './pipeline/limits.js';
 import { plannerDownshift, routeWithSession, sessionTooBig } from './pipeline/session.js';
 import { forcedClassification, selectChecks, shouldReview, skippedRecord, stepBudget } from './pipeline/steps.js';
+import { afterFailure, callFailureKind, checkFailureKind, type FailureKind, type TaskFailure } from './pipeline/outcome.js';
 
 export interface PipelineDeps {
   run: RunClaudeFn;
@@ -69,11 +70,28 @@ export interface TaskSummary {
   steps: StepRecord[];
   classification?: Classification;
   plan?: Plan;
+  /** Why it did not finish (absent when ok). Drives `-p` JSON's `failure` and the exit code. */
+  failure?: TaskFailure;
 }
 
 /**
  * Orchestrates classify → plan → approve → execute → verify. It only talks to the outside
  * world through `deps` and the event bus, so any frontend can drive it.
+ *
+ * Task states (one task at a time; `running` guards re-entry):
+ *
+ *   start ─┬─ small talk ─────────────────────────────────────────────► respond ──► finish
+ *          ├─ /resume ─► (plan and done steps from the pending task) ─► execute
+ *          └─ classify ─┬─ answerable question ────────────────────────► respond ──► finish
+ *                       └─ plan? ─► dry run? ──────────────────────────────────────► finish (ok)
+ *                                   └─ approve? (multi-step plans) ─► execute
+ *   execute: each step not already done ─► attempt loop (below); the first step that does not finish ends the loop
+ *   finish:  summary snapshot (/undo, /diff), conversation memory, pending task for /resume, cost record, terminal event
+ *   any error or cancel ─► finish(aborted) and an `error` / `task:cancelled` event instead of `task:done`
+ *
+ * Attempt loop of one step: budget left? ─► run Claude ─► verify (checks) ─► review ─► done
+ *   on a failure its kind (pipeline/outcome.ts) decides: retry, escalate, stop (environment, budget) or give up.
+ *   Errors that are not about the step (auth, missing CLI, usage limit, overloaded) end the task and keep it resumable.
  */
 export class Pipeline {
   private forced: ModelTier | null = null;
@@ -110,6 +128,10 @@ export class Pipeline {
   private bgSnapshot: Promise<string | null> | null = null;
   /** Every Claude call goes through here so account usage reported in any stream is captured. */
   private readonly run: RunClaudeFn;
+  /** Why the last step that did not finish stopped (reset per task). */
+  private stepFailure: TaskFailure | undefined;
+  /** The step record being worked on, so a task that is aborted mid-step (usage limit, auth) still records it. */
+  private inFlight: StepRecord | null = null;
 
   constructor(
     private readonly config: SmartConfig,
@@ -237,6 +259,8 @@ export class Pipeline {
     const startedAt = (this.deps.now?.() ?? new Date()).toISOString();
     const summary: TaskSummary = { taskId, ok: false, cancelled: false, dryRun, totals: emptyUsage(), steps: [] };
     this.overhead = emptyUsage();
+    this.stepFailure = undefined;
+    this.inFlight = null;
     this.changes.fresh = null;
     const touched: string[] = [];
     let startTree: string | null = null;
@@ -371,6 +395,7 @@ export class Pipeline {
         if (doneIds.has(step.id)) continue;
         // The first step that runs now (not necessarily index 0: /resume starts later) gets what you referenced with @path.
         const rec = await this.runOneStep({ plan, step, index, total: active.length, classification, touched, current: (s) => at(s), prompt, cursor, referenced, first });
+        this.inFlight = null;
         first = false;
         summary.steps.push(rec);
         if (rec.outcome === 'done') doneIds.add(step.id);
@@ -382,11 +407,19 @@ export class Pipeline {
       }
       for (const s of plan.steps.filter((s) => s.skipped)) summary.steps.push(skippedRecord(s));
       summary.ok = !failed;
+      if (failed) summary.failure = this.stepFailure ?? { kind: 'model', message: 'A step did not finish.' };
       stage('execute', failed ? 'failed' : 'done');
       return await this.finish(summary, { startedAt, prompt, touched, startTree, doneIds });
     } catch (e) {
       summary.ok = false;
       if (isCancelled(e)) summary.cancelled = true;
+      const stepFailure = this.stepFailure as TaskFailure | undefined; // set by runOneStep meanwhile
+      const aborted = this.inFlight as StepRecord | null;
+      if (aborted && !summary.steps.includes(aborted)) summary.steps.push({ ...aborted, outcome: summary.cancelled ? 'cancelled' : 'failed' });
+      this.inFlight = null;
+      summary.failure = summary.cancelled
+        ? { kind: 'cancelled', message: 'Cancelled.', ...(stepFailure?.stepId ? { stepId: stepFailure.stepId } : {}) }
+        : e instanceof SmartError ? { kind: e.kind, message: e.message } : { kind: 'internal', message: (e as Error)?.message ?? String(e) };
       // Save the state (checkpoint, /resume, cost record) BEFORE telling the frontend the task is over: a one-shot run exits
       // as soon as it sees the terminal event, and would otherwise lose all of it.
       const out = await this.finish(summary, { startedAt, prompt, touched, startTree, aborted: true, doneIds: doneRef.ids, executing: doneRef.executing });
@@ -474,6 +507,8 @@ export class Pipeline {
       if (isCancelled(e)) throw e;
       if (e instanceof SmartError && e.kind !== 'claude') throw e;
       emit({ type: 'step:failed', stepId: step.id, error: (e as Error).message, at: this.now() });
+      rec.failure = callFailureKind(e);
+      summary.failure = { kind: rec.failure, message: (e as Error).message, stepId: step.id };
     }
     summary.steps.push(rec);
     summary.ok = rec.outcome === 'done';
@@ -685,10 +720,22 @@ export class Pipeline {
       stepId: step.id, title: step.title, model: first.model, tier: first.tier, attempts: 0, escalated: false, usage: emptyUsage(), outcome: 'failed',
       ...(first.score !== undefined ? { rated: { tier: first.tier, ...(startEffort ? { effort: startEffort } : {}), score: first.score } } : {}),
     };
+    this.inFlight = rec;
 
     let tier = first.tier;
     let failuresOnTier = 0;
     let failure: string | undefined;
+    /** Why the latest attempt failed (see pipeline/outcome.ts), and how many attempts failed for reasons around the work. */
+    let kind: FailureKind = 'model';
+    let environmentFailures = 0;
+    let fromCheck = false;
+    const fail = (k: FailureKind, message: string): StepRecord => {
+      rec.outcome = k === 'cancelled' ? 'cancelled' : 'failed';
+      rec.failure = k;
+      this.stepFailure = { kind: k, message, stepId: step.id };
+      emit({ type: 'step:failed', stepId: step.id, error: k === 'cancelled' ? 'Cancelled' : message, at: this.now() });
+      return rec;
+    };
     /** The decision the current model was chosen with. Retries adjust the effort from THIS each time, so they never compound. */
     let base = first;
     let decision: RouteDecision;
@@ -696,11 +743,9 @@ export class Pipeline {
     for (;;) {
       const cap = this.config.limits.maxBudgetUsdPerTask;
       if (cap && this.taskUsage.costUsd >= cap) {
-        rec.outcome = 'failed';
         const msg = `Task budget of $${cap} reached (spent $${this.taskUsage.costUsd.toFixed(2)}); stopping.`;
         emit({ type: 'notice', level: 'warn', message: msg });
-        emit({ type: 'step:failed', stepId: step.id, error: msg });
-        return rec;
+        return fail('budget', msg);
       }
       rec.attempts += 1;
       rec.tier = tier;
@@ -778,11 +823,22 @@ export class Pipeline {
         if (signal.aborted) throw cancelled();
         if (checks.length > 0) this.changes.fresh = null; // a check can write files (a formatter, a build)
         // This attempt's own problem (`failure` still holds the previous attempt's text, which was already sent to the model).
-        let problem: string | undefined = v.ok ? undefined : `${v.failure?.command} failed:\n${v.failure?.output}`;
+        let problem: string | undefined;
+        if (!v.ok && v.failure) {
+          kind = checkFailureKind(v.failure);
+          fromCheck = true;
+          problem = kind === 'environment'
+            ? `The check \`${v.failure.command}\` could not run (${v.failure.code === null ? 'it did not start' : `exit code ${v.failure.code}: command not found`}). That is not something a model can fix: install what it needs, or adjust verify.commands, then /resume.\n${v.failure.output}`
+            : `${v.failure.command} failed:\n${v.failure.output}`;
+        }
         let reviewed = false;
         if (v.ok && shouldReview(this.config, classification, plan.steps.length, checks.length, stepFiles)) {
           a.current('verify');
           problem = await this.review(a.prompt, step, stepFiles, signal, base.score);
+          if (problem) {
+            kind = 'review';
+            fromCheck = false;
+          }
           reviewed = true;
         }
         emit({ type: 'stage', stage: 'verify', status: checks.length === 0 && !reviewed ? 'skipped' : problem ? 'failed' : 'done' });
@@ -790,11 +846,9 @@ export class Pipeline {
         if (problem) failure = problem;
         else ok = true;
       } catch (e) {
-        if (isCancelled(e)) {
-          rec.outcome = 'cancelled';
-          emit({ type: 'step:failed', stepId: step.id, error: 'Cancelled', at: this.now() });
-          return rec;
-        }
+        if (isCancelled(e)) return fail('cancelled', 'Cancelled');
+        // The call's spend counts for the step too (the task total already has it, see makeRun).
+        if (e instanceof SmartError && e.usage) rec.usage = addUsage(rec.usage, e.usage);
         // The saved Claude Code session is gone (cleaned up, other machine): start a new one, carrying our memory.
         if (e instanceof SmartError && e.kind === 'claude' && resuming && /No conversation found/i.test(e.message)) {
           this.conv.sessionId = null;
@@ -804,8 +858,13 @@ export class Pipeline {
           continue;
         }
         // Auth / missing CLI / internal problems will not fix themselves: abort the task.
-        if (e instanceof SmartError && e.kind !== 'claude') throw e;
+        if (e instanceof SmartError && e.kind !== 'claude') {
+          rec.failure = e.kind === 'limit' ? 'limit' : 'environment';
+          throw e;
+        }
         failure = (e as Error).message;
+        kind = callFailureKind(e);
+        fromCheck = false;
       }
 
       if (ok) {
@@ -814,13 +873,14 @@ export class Pipeline {
         return rec;
       }
 
-      failuresOnTier += 1;
-      // A forced model is a user decision: retry it, but never silently switch to another.
-      const next = this.forced ? (failuresOnTier <= this.config.escalation.retriesPerModel ? ({ action: 'retry', tier } as const) : ({ action: 'give_up' } as const)) : nextAttempt({ tier, failuresOnTier }, this.config);
-      if (next.action === 'give_up') {
-        rec.outcome = 'failed';
-        emit({ type: 'step:failed', stepId: step.id, error: failure ?? 'failed', at: this.now() });
-        return rec;
+      // A failure around the work (Claude Code did not start) is retried as is: no more effort, no bigger model.
+      if (kind === 'environment') environmentFailures += 1;
+      else failuresOnTier += 1;
+      // A forced model is a user decision: retry it, but never silently switch to another (see afterFailure).
+      const next = afterFailure({ kind, tier, failuresOnTier, environmentFailures, fromCheck, forced: this.forced !== null, config: this.config });
+      if (next.action === 'stop' || next.action === 'give_up') {
+        if (next.action === 'stop' && kind === 'budget') emit({ type: 'notice', level: 'warn', message: failure ?? 'The budget ran out.' });
+        return fail(kind, failure ?? 'failed');
       }
       if (next.action === 'escalate') {
         rec.escalated = true;
@@ -880,7 +940,7 @@ export class Pipeline {
     this.release();
     if (!aborted) {
       this.bus.emit({ type: 'stage', stage: 'done', status: summary.ok ? 'done' : 'failed' });
-      this.bus.emit({ type: 'task:done', taskId: summary.taskId, totals: summary.totals, ok: summary.ok, at: this.now() });
+      this.bus.emit({ type: 'task:done', taskId: summary.taskId, totals: summary.totals, ok: summary.ok, at: this.now(), ...(summary.failure ? { failure: summary.failure.kind } : {}) });
     }
     return summary;
   }

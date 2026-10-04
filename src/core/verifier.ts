@@ -16,6 +16,8 @@ export interface ExecResult {
   code: number | null;
   output: string;
   timedOut?: boolean;
+  /** The command could not be started at all (no shell, bad working directory). */
+  spawnFailed?: boolean;
 }
 
 export type ExecFn = (command: string, opts: { cwd: string; signal?: AbortSignal; timeoutMs: number }) => Promise<ExecResult>;
@@ -26,8 +28,8 @@ export interface VerifyResult {
   skipped: boolean;
   /** Commands that ran, in order, with their outcome. */
   ran: { command: string; ok: boolean }[];
-  /** First failing check, if any. */
-  failure?: { command: string; output: string };
+  /** First failing check, if any, with how it failed (see pipeline/outcome.ts checkFailureKind). */
+  failure?: { command: string; output: string; code: number | null; timedOut?: boolean; spawnFailed?: boolean };
 }
 
 const OUTPUT_LIMIT = 2000;
@@ -116,6 +118,7 @@ export const defaultExec: ExecFn = (command, { cwd, signal, timeoutMs }) =>
     const child = spawn(command, { cwd, shell: true, detached: !win, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CI: '1', FORCE_COLOR: '0' } });
     let output = '';
     let timedOut = false;
+    let spawnFailed = false;
     let done = false;
     const append = (c: Buffer) => {
       output = (output + c.toString('utf8')).slice(-OUTPUT_LIMIT * 4);
@@ -148,10 +151,11 @@ export const defaultExec: ExecFn = (command, { cwd, signal, timeoutMs }) =>
       done = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', stop);
-      resolve({ code, output, timedOut });
+      resolve({ code, output, timedOut, ...(spawnFailed ? { spawnFailed } : {}) });
     };
     child.on('error', (e) => {
       output += `\n${e.message}`;
+      spawnFailed = true;
       finish(null);
     });
     child.on('close', (code) => finish(code));
@@ -173,11 +177,11 @@ export async function runChecks(checks: Check[], opts: VerifyOptions): Promise<V
   const ran: VerifyResult['ran'] = [];
   for (const check of checks) {
     const res = await exec(check.command, { cwd: opts.cwd, signal: opts.signal, timeoutMs });
-    const ok = res.code === 0;
+    const ok = res.code === 0 && !res.timedOut;
     const output = tail(res.timedOut ? `${res.output}\n[timed out after ${opts.config.verify.timeoutSec}s]` : res.output);
     ran.push({ command: check.command, ok });
     opts.onCheck?.({ command: check.command, ok, output });
-    if (!ok) return { ok: false, skipped: false, ran, failure: { command: check.command, output } };
+    if (!ok) return { ok: false, skipped: false, ran, failure: { command: check.command, output, code: res.code, timedOut: res.timedOut, spawnFailed: res.spawnFailed } };
   }
   return { ok: true, skipped: false, ran };
 }
