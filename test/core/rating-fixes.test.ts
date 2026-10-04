@@ -131,13 +131,13 @@ describe('easy-edit signals are limited to clearly small changes', () => {
 describe('smart --rate', () => {
   it('shows both answers when the floor matters: a question may go to Haiku, a change starts at Sonnet', () => {
     const out = describeRating('fix the typo in the readme', defaultConfig()).join('\n');
-    expect(out).toContain('if it is a change');
-    expect(out).toMatch(/haiku if it is only a question/);
+    expect(out).toMatch(/Decision: sonnet · \w+ for a change/);
+    expect(out).toMatch(/If it is only a question: haiku/);
   });
 
-  it('shows a single answer when both agree', () => {
+  it('a hard task is the same model whether it is a change or a question', () => {
     const out = describeRating('the workers stall intermittently, find the root cause of this concurrency bug in the pool', defaultConfig()).join('\n');
-    expect(out).not.toContain('if it is a change');
-    expect(out).toMatch(/Result: opus · \w+, rated/);
+    expect(out).toMatch(/Decision: opus · \w+ for a change/);
+    expect(out).toMatch(/If it is only a question: opus/);
   });
 });

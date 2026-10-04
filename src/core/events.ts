@@ -25,7 +25,8 @@ export type SmartEvent =
   | { type: 'step:escalate'; stepId: string; from: ModelTier; to: ModelTier; reason: string }
   | { type: 'step:done'; stepId: string; at?: number }
   | { type: 'step:failed'; stepId: string; error: string; at?: number }
-  | { type: 'task:done'; taskId: string; totals: Usage; ok: boolean; at?: number }
+  /** `failure`: why it did not finish (see pipeline/outcome.ts), absent when ok. */
+  | { type: 'task:done'; taskId: string; totals: Usage; ok: boolean; at?: number; failure?: string }
   | { type: 'task:cancelled'; taskId: string }
   | { type: 'conversation'; tasks: number; resumed: boolean }
   | { type: 'limits'; limits: Limits }

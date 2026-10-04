@@ -61,14 +61,14 @@ describe('runPrint', () => {
     expect(j.usage.costUsd).toBeGreaterThan(0);
   });
 
-  it('returns 1 and reports the error with its hint when the task fails', async () => {
+  it('returns 3 (Claude Code not available) and reports the error with its hint when it is not logged in', async () => {
     const ctx = makeApp({ complexity: 'small_edit', executor: async () => { throw new SmartError('auth', 'not logged in', 'Run `claude` to log in'); } });
     const cap = io();
     const code = await runPrint(ctx.pipeline, ctx.bus, 'x', base, cap.io);
-    expect(code).toBe(1);
+    expect(code).toBe(3);
     expect(text(cap.err)).toContain('error: not logged in Run `claude` to log in');
     expect(text(cap.out)).toBe('');
-    expect(text(cap.err)).toContain('failed in');
+    expect(text(cap.err)).toContain('failed (auth) in');
   });
 
   it('returns 130 when cancelled', async () => {
@@ -120,3 +120,46 @@ describe('runPrint', () => {
     expect(j.steps.map((s: { outcome: string }) => s.outcome)).toEqual(['done', 'done']);
   });
 });
+
+describe('exit codes and machine-readable output', () => {
+  const run = async (executor: () => Promise<ClaudeResult>, opts: Partial<PrintOptions> = {}, setup?: (c: ReturnType<typeof makeApp>) => void) => {
+    const ctx = makeApp({ complexity: 'small_edit', executor });
+    setup?.(ctx);
+    const cap = io();
+    const code = await runPrint(ctx.pipeline, ctx.bus, 'x', { ...base, format: 'json', ...opts }, cap.io);
+    return { code, out: text(cap.out), err: text(cap.err) };
+  };
+
+  it('a step that keeps failing exits 1 with failure.kind in the JSON, and stdout holds only that JSON', async () => {
+    const r = await run(async () => { throw new SmartError('claude', 'Claude Code reported an error: error_max_turns'); });
+    expect(r.code).toBe(1);
+    const j = JSON.parse(r.out);
+    expect(j).toMatchObject({ ok: false, exitCode: 1, failure: { kind: 'model', step: 's1' } });
+    expect(r.out.trim().startsWith('{') && r.out.trim().endsWith('}')).toBe(true);
+    expect(r.err).toContain('smart: ');
+  });
+
+  it('usage limit exits 5 (try again later), budget 4', async () => {
+    expect((await run(async () => { throw new SmartError('limit', 'limit reached'); })).code).toBe(5);
+    const e = new SmartError('claude', 'Claude Code reported an error: error_max_budget_usd');
+    const b = await run(async () => { throw e; });
+    expect(b.code).toBe(4);
+    expect(JSON.parse(b.out).failure.kind).toBe('budget');
+  });
+
+  it('--resume with nothing to resume exits 6 with a JSON error document instead of crashing', async () => {
+    const r = await run(async () => ok(), { resume: true });
+    expect(r.code).toBe(6);
+    expect(JSON.parse(r.out)).toMatchObject({ ok: false, exitCode: 6, failure: { kind: 'resume' } });
+  });
+
+  it('a successful task has exitCode 0 and no failure; usage includes cache creation tokens', async () => {
+    const r = await run(async () => ok());
+    const j = JSON.parse(r.out);
+    expect(r.code).toBe(0);
+    expect(j.failure).toBeNull();
+    expect(j.exitCode).toBe(0);
+    expect(j.usage).toHaveProperty('cacheCreationTokens');
+  });
+});
+

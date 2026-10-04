@@ -1,6 +1,7 @@
 import type { SmartEvent, Stage, StageStatus } from '../core/events.js';
 import type { Classification, Limits, ModelTier, Plan, RouteDecision, Usage } from '../core/types.js';
 import { emptyUsage } from '../core/types.js';
+import { forTerminal } from '../core/text.js';
 import { fmtCost, fmtDuration } from './format.js';
 
 export type StepStatus = 'pending' | 'active' | 'verifying' | 'done' | 'failed' | 'skipped' | 'cancelled';
@@ -33,6 +34,8 @@ export interface UiState {
   session: Usage;
   sessionAtTaskStart: Usage;
   ok?: boolean;
+  /** Why the last task did not finish (a failure or error kind; `cancelled`), for the exit code of a one-shot run. */
+  failure?: string;
   taskStartedAt?: number;
   stepStartedAt: Record<string, number>;
   /** Wall time of finished steps, in ms. */
@@ -55,9 +58,10 @@ export const initialState = (): UiState => ({
   escalatedTo: {}, output: [], session: emptyUsage(), sessionAtTaskStart: emptyUsage(), chatTasks: 0, limits: null, stepStartedAt: {}, stepDuration: {}, nextId: 1,
 });
 
+/** Every line shown goes through here: model text and diffs of your files lose terminal escape sequences (see core/text.ts). */
 const push = (s: UiState, kind: OutputLine['kind'], text: string, stepId?: string): UiState => ({
   ...s,
-  output: [...s.output, { id: s.nextId, kind, text, stepId }].slice(-MAX_OUTPUT),
+  output: [...s.output, { id: s.nextId, kind, text: forTerminal(text), stepId }].slice(-MAX_OUTPUT),
   nextId: s.nextId + 1,
 });
 
@@ -90,7 +94,7 @@ export function reduce(s: UiState, e: UiAction): UiState {
       return push(
         {
           ...s, phase: 'running', prompt: e.prompt, dryRun: e.dryRun, stages: initialStages(), classification: undefined, classifyReason: undefined,
-          plan: undefined, routes: {}, stepStatus: {}, stepAttempt: {}, escalatedTo: {}, currentStepId: undefined, ok: undefined,
+          plan: undefined, routes: {}, stepStatus: {}, stepAttempt: {}, escalatedTo: {}, currentStepId: undefined, ok: undefined, failure: undefined,
           sessionAtTaskStart: s.session, taskStartedAt: e.at, stepStartedAt: {}, stepDuration: {},
         },
         'info', e.dryRun ? 'Dry run: classify and plan only, nothing will execute.' : 'Task started.',
@@ -126,8 +130,9 @@ export function reduce(s: UiState, e: UiAction): UiState {
     case 'step:stream': {
       // Grow the live line of this step, or start one.
       const last = s.output.at(-1);
-      if (last?.live && last.stepId === e.stepId) return { ...s, output: [...s.output.slice(0, -1), { ...last, text: last.text + e.text }] };
-      return { ...s, output: [...s.output, { id: s.nextId, kind: 'text' as const, text: e.text, stepId: e.stepId, live: true }].slice(-MAX_OUTPUT), nextId: s.nextId + 1 };
+      const text = forTerminal(e.text);
+      if (last?.live && last.stepId === e.stepId) return { ...s, output: [...s.output.slice(0, -1), { ...last, text: last.text + text }] };
+      return { ...s, output: [...s.output, { id: s.nextId, kind: 'text' as const, text, stepId: e.stepId, live: true }].slice(-MAX_OUTPUT), nextId: s.nextId + 1 };
     }
     case 'step:output': {
       // The complete text replaces what was streamed of it; anything else ends a live line as it stands.
@@ -166,15 +171,15 @@ export function reduce(s: UiState, e: UiAction): UiState {
         e.error === 'Cancelled' ? 'warn' : 'error', e.error === 'Cancelled' ? 'Step cancelled.' : `Step failed: ${e.error}`, e.stepId,
       );
     case 'task:done':
-      return push({ ...s, phase: 'finished', ok: e.ok }, e.ok ? 'info' : 'error', `${e.ok ? '✓ Done' : '✗ Task did not complete'}${summaryTail(s, e)}`);
+      return push({ ...s, phase: 'finished', ok: e.ok, failure: e.ok ? undefined : (e.failure ?? 'model') }, e.ok ? 'info' : 'error', `${e.ok ? '✓ Done' : '✗ Task did not complete'}${summaryTail(s, e)}`);
     case 'limits':
       return { ...s, limits: e.limits };
     case 'conversation':
       return { ...s, chatTasks: e.tasks };
     case 'task:cancelled':
-      return push({ ...s, phase: 'finished', ok: false }, 'warn', 'Cancelled.');
+      return push({ ...s, phase: 'finished', ok: false, failure: 'cancelled' }, 'warn', 'Cancelled.');
     case 'error':
-      return push({ ...s, phase: 'finished', ok: false }, 'error', e.hint ? `${e.message}\n${e.hint}` : e.message);
+      return push({ ...s, phase: 'finished', ok: false, failure: e.kind }, 'error', e.hint ? `${e.message}\n${e.hint}` : e.message);
     default:
       return s;
   }

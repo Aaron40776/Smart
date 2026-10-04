@@ -4,6 +4,7 @@ import type { SmartConfig } from './config.js';
 import { SmartError } from './errors.js';
 import { extractJson, structuredFrom } from './json.js';
 import { extractFeatures } from './rating/features.js';
+import { block, oneLine } from './text.js';
 import { modelFor, routeRole } from './router.js';
 import { COMPLEXITIES, emptyUsage, type Classification, type Usage } from './types.js';
 
@@ -52,8 +53,8 @@ export function parseClassification(raw: unknown): Classification | null {
   // Keep the flags coherent: nothing to plan for a question, always plan a big build.
   const needsPlan = complexity === 'trivial' ? false : complexity === 'large_build' ? true : (parsed.data.needsPlan ?? false);
   // Only a trivial task may be answered on the spot; an empty or whitespace answer means "go and do it".
-  const answer = complexity === 'trivial' ? parsed.data.answer?.trim() || undefined : undefined;
-  return { complexity, needsPlan, reason: parsed.data.reason?.trim() || `classified as ${complexity}`, ...(parsed.data.difficulty ? { difficulty: parsed.data.difficulty } : {}), ...(answer ? { answer } : {}) };
+  const answer = complexity === 'trivial' ? block(parsed.data.answer ?? '', 20_000) || undefined : undefined;
+  return { complexity, needsPlan, reason: oneLine(parsed.data.reason ?? '', 200) || `classified as ${complexity}`, ...(parsed.data.difficulty ? { difficulty: parsed.data.difficulty } : {}), ...(answer ? { answer } : {}) };
 }
 
 /**

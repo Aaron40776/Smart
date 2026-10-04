@@ -1,6 +1,6 @@
 {
   "name": "@aaron40776/smart",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Interactive TUI that wraps Claude Code to maximize result quality while minimizing token usage",
   "type": "module",
   "license": "MIT",
@@ -38,7 +38,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check",
+    "bench": "tsx bench/routing/run.ts"
   },
   "dependencies": {
     "commander": "^15.0.0",

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render } from 'ink-testing-library';
@@ -7,7 +7,6 @@ import { ConversationStore, dirKey, newConversation } from '../src/core/store/co
 import { App } from '../src/ui/App.js';
 import { CLEAR_PROGRESS, progressFor, progressSequence } from '../src/ui/progress.js';
 import { initialState } from '../src/ui/state.js';
-import { updateSmart, type RunCommand } from '../src/update.js';
 import { KEYS, makeApp, wait, waitFor } from './ui/helpers.js';
 
 const tmp = (p = 'smart-b1-') => mkdtempSync(join(tmpdir(), p));
@@ -71,38 +70,4 @@ describe('taskbar progress', () => {
   });
 });
 
-describe('smart update', () => {
-  const clone = () => {
-    const root = tmp('smart-clone-');
-    mkdirSync(join(root, '.git'));
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '0.3.0' }));
-    return root;
-  };
-
-  it('pulls, installs and rebuilds in the folder smart was cloned to', () => {
-    const root = clone();
-    const ran: string[] = [];
-    const lines: string[] = [];
-    const exec: RunCommand = (cmd, args, cwd) => {
-      ran.push(`${cmd} ${args.join(' ')} @${cwd === root}`);
-      if (args[0] === 'pull') writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '0.4.0' })); // the pull brought a new version
-      return 0;
-    };
-    expect(updateSmart(root, exec, (l) => lines.push(l))).toBe(0);
-    expect(ran).toEqual(['git checkout -- package-lock.json @true', 'git pull --ff-only @true', 'npm ci @true', 'npm run build @true']);
-    expect(lines.at(-1)).toBe('Updated smart 0.3.0 → 0.4.0. See CHANGELOG.md for what changed.');
-  });
-
-  it('stops at the first failing step and says what to do', () => {
-    const lines: string[] = [];
-    const exec: RunCommand = (cmd, args) => (args[0] === 'pull' ? 1 : 0);
-    expect(updateSmart(clone(), exec, (l) => lines.push(l))).toBe(1);
-    expect(lines.at(-1)).toMatch(/git pull --ff-only` failed.*git stash/);
-  });
-
-  it('explains when smart was not installed from a git clone', () => {
-    const lines: string[] = [];
-    expect(updateSmart(tmp(), () => 0, (l) => lines.push(l))).toBe(1);
-    expect(lines[0]).toMatch(/not installed with git.*install\.ps1/);
-  });
-});
+// `smart update` is covered by test/update.test.ts (against real git repositories).

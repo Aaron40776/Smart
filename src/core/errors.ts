@@ -1,10 +1,15 @@
-export type ErrorKind = 'cli_missing' | 'auth' | 'limit' | 'overloaded' | 'cancelled' | 'parse' | 'claude' | 'config' | 'internal';
+export type ErrorKind = 'cli_missing' | 'auth' | 'limit' | 'overloaded' | 'cancelled' | 'parse' | 'claude' | 'config' | 'resume' | 'internal';
 
 export class SmartError extends Error {
   /** Spend of a call that ended in an error (it still cost money), so budgets and totals stay honest. */
   usage?: import('./types.js').Usage;
   /** For a `limit` error: when the usage window resets (epoch seconds), if Claude said. */
   resetsAt?: number;
+  /**
+   * The call never got going (Claude Code did not start, or produced no output at all), so nothing reached the model:
+   * a problem with the machine, not with the work, which a bigger model would not fix.
+   */
+  noOutput?: boolean;
 
   constructor(
     public readonly kind: ErrorKind,

@@ -103,3 +103,119 @@ describe('resume', () => {
     expect(t.pipeline.pendingTask).toBeNull();
   });
 });
+
+describe('resume and sessions: the step that continues is never left without context', () => {
+  const failSecond = (writes?: (n: number) => void) => (_call: Call, n: number): ClaudeResult => {
+    writes?.(n);
+    if (n === 2) throw new SmartError('claude', 'boom');
+    return { isError: false, subtype: 'success', text: `reply ${n}`, structured: undefined, usage: { ...emptyUsage(), costUsd: 0.01, outputTokens: 5 }, sessionId: 's', numTurns: 1 };
+  };
+  const once = (c: SmartConfig) => { c.escalation.retriesPerModel = 0; c.escalation.ladder = ['sonnet']; };
+  const storeIn = () => new ConversationStore(join(mkdtempSync(join(tmpdir(), 'smart-res-')), 'c.json'));
+
+  it('after a restart whose saved session is gone, the resumed step gets the conversation summary in a new session', async () => {
+    const store = storeIn();
+    const a = setup({ complexities: ['large_build'], store, executor: failSecond(), config: once });
+    await a.pipeline.runTask('build the snake game', { autoApprove: true });
+    const b = setup({
+      store, conversation: store.load(a.cwd),
+      executor: (call) => {
+        if (call.session?.resume) throw new SmartError('claude', 'No conversation found with session ID: x');
+        return { isError: false, subtype: 'success', text: 'done', structured: undefined, usage: emptyUsage(), sessionId: 's', numTurns: 1 };
+      },
+    });
+    const r = await b.pipeline.resumeTask();
+    expect(r.ok).toBe(true);
+    const [lost, fresh] = b.executors();
+    expect(lost?.session?.resume).toBe(true);
+    expect(fresh?.session?.resume).toBe(false);
+    expect(fresh?.prompt).toContain('Context from earlier in this conversation');
+    expect(fresh?.prompt).toContain('build the snake game');
+    expect(fresh?.prompt).toContain('step 2 of 2');
+  });
+
+  it('a resumed step after a session rollover gets the summary too, and the files earlier steps changed', async () => {
+    const store = storeIn();
+    const a = setup({ complexities: ['large_build'], store, executor: failSecond(), config: (c) => { once(c); c.session.maxContextTokens = 1000; } });
+    await a.pipeline.runTask('build it', { autoApprove: true });
+    const conv = (a.pipeline as unknown as { conv: { contextTokens?: number; pending?: { files?: string[] } } }).conv;
+    conv.contextTokens = 5000; // the session grew past session.maxContextTokens
+    conv.pending!.files = ['src/game.ts'];
+    const r = await a.pipeline.resumeTask();
+    expect(r.ok).toBe(true);
+    const resumed = a.executors().at(-1)!;
+    expect(resumed.session?.resume).toBe(false); // a fresh session...
+    expect(resumed.prompt).toContain('Context from earlier in this conversation'); // ...with the summary
+    expect(resumed.prompt).toContain('Files changed in earlier steps: src/game.ts');
+    expect(a.of('notice').some((n) => /fresh Claude Code session/.test(n.message))).toBe(true);
+  });
+
+  it('remembers which files the finished steps changed, through a restart', async () => {
+    const store = storeIn();
+    const a = setup({ complexities: ['large_build'], store, executor: failSecond(), config: once });
+    await a.pipeline.runTask('build it', { autoApprove: true });
+    expect(store.load(a.cwd)?.pending?.files).toEqual([]); // nothing was written in this fake, but the field is saved
+  });
+
+  it('a session lost between two steps of one run: the next step starts a new one with the summary', async () => {
+    let n = 0;
+    const t = setup({
+      complexities: ['small_edit', 'large_build'],
+      executor: (call) => {
+        n += 1;
+        if (n === 3 && call.session?.resume) throw new SmartError('claude', 'No conversation found with session ID: y');
+        return { isError: false, subtype: 'success', text: `r${n}`, structured: undefined, usage: emptyUsage(), sessionId: 's', numTurns: 1 };
+      },
+    });
+    await t.pipeline.runTask('first task');
+    const r = await t.pipeline.runTask('build more', { autoApprove: true });
+    expect(r.ok).toBe(true);
+    const ex = t.executors();
+    expect(ex[2]?.session?.resume).toBe(true); // step 2 tried the saved session
+    expect(ex[3]?.session?.resume).toBe(false); // and got a new one
+    expect(ex[3]?.prompt).toContain('first task');
+  });
+
+  it('cancelling the resumed step keeps the task resumable and never reports it done', async () => {
+    const store = storeIn();
+    const a = setup({ complexities: ['large_build'], store, executor: failSecond(), config: once });
+    await a.pipeline.runTask('build it', { autoApprove: true });
+    const b = setup({
+      store, conversation: store.load(a.cwd),
+      executor: () => new Promise<ClaudeResult>((_r, reject) => setTimeout(() => reject(new SmartError('cancelled', 'Cancelled.')), 20)),
+    });
+    const p = b.pipeline.resumeTask();
+    b.pipeline.cancel();
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.cancelled).toBe(true);
+    expect(b.pipeline.pendingTask?.doneStepIds).toHaveLength(1);
+    expect(b.of('task:done')).toHaveLength(0);
+  });
+
+  it('an escalation after a rollover runs on the stronger model in the fresh session', async () => {
+    let n = 0;
+    const t = setup({
+      complexities: ['small_edit', 'small_edit'],
+      config: (c) => { c.session.maxContextTokens = 10; c.escalation.retriesPerModel = 0; },
+      executor: () => {
+        n += 1;
+        if (n === 2) throw new SmartError('claude', 'step failed');
+        return { isError: false, subtype: 'success', text: `r${n}`, structured: undefined, usage: emptyUsage(), sessionId: 's', numTurns: 1 };
+      },
+    });
+    await t.pipeline.runTask('one');
+    (t.pipeline as unknown as { conv: { contextTokens: number } }).conv.contextTokens = 100;
+    const r = await t.pipeline.runTask('two');
+    expect(r.ok).toBe(true);
+    const [, failed, escalated] = t.executors();
+    expect(failed?.session?.resume).toBe(false); // rolled over before the task
+    expect(escalated?.model).toBe('opus');
+    // The failed call may or may not have created its session, so neither resuming it nor reusing its id is safe: a new one,
+    // with the summary and the failure text.
+    expect(escalated?.session?.resume).toBe(false);
+    expect(escalated?.session?.id).not.toBe(failed?.session?.id);
+    expect(escalated?.prompt).toContain('Context from earlier in this conversation');
+    expect(escalated?.prompt).toContain('step failed');
+  });
+});

@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmdirSync, rmSync, unlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
+import { insideRel, realPathOf, unsafePathReason } from './paths.js';
+import { programPath } from './which.js';
 
 export interface FileChange {
   path: string;
@@ -36,9 +38,17 @@ export interface Checkpointer {
   /**
    * Make the working tree match `target` again (only files that differ from `current` are touched).
    * With `only`, just those repo-relative paths: the files one task changed, not every edit since.
+   * `failed` lists files it could not put back or remove (a file that is locked, a folder that now links out of the project).
+   * Null when nothing could be done; files may still have been written if git failed part-way.
    */
-  restore(target: string, current: string, only?: string[]): Promise<{ restored: number; removed: number } | null>;
+  restore(target: string, current: string, only?: string[]): Promise<RestoreResult | null>;
   dispose(): void;
+}
+
+export interface RestoreResult {
+  restored: number;
+  removed: number;
+  failed: string[];
 }
 
 interface GitResult {
@@ -50,8 +60,11 @@ const TIMEOUT_MS = 60_000;
 
 function git(args: string[], opts: { cwd: string; env?: Record<string, string>; input?: string; timeoutMs?: number }): Promise<GitResult> {
   return new Promise((resolve) => {
+    // An absolute path on Windows, so a git.exe inside the project is never the one that runs (see which.ts).
+    const bin = programPath('git');
+    if (!bin) return resolve({ code: 127, stdout: '' });
     const child = execFile(
-      'git',
+      bin,
       args,
       { cwd: opts.cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...opts.env }, maxBuffer: 64 * 1024 * 1024, timeout: opts.timeoutMs ?? TIMEOUT_MS, encoding: 'utf8', windowsHide: true },
       (err, stdout) => {
@@ -136,7 +149,7 @@ export class GitCheckpoints implements Checkpointer {
       // T (file <-> symlink type change) is restored like a modification.
       if (path && (status === 'A' || status === 'M' || status === 'D' || status === 'T')) files.push({ path, status: status === 'T' ? 'M' : status });
     }
-    const stat = await git(['diff', '--no-renames', '--no-ext-diff', '--numstat', from, to, ...scope], { cwd: this.root });
+    const stat = await git(['diff', '--no-renames', '--no-ext-diff', '--no-textconv', '--numstat', from, to, ...scope], { cwd: this.root });
     let insertions = 0;
     let deletions = 0;
     if (stat.code === 0) {
@@ -158,55 +171,103 @@ export class GitCheckpoints implements Checkpointer {
     return r.code === 0 ? r.stdout : null;
   }
 
-  async restore(target: string, current: string, only?: string[]): Promise<{ restored: number; removed: number } | null> {
+  async restore(target: string, current: string, only?: string[]): Promise<RestoreResult | null> {
     if (!this.available) return null;
     const ch = await this.changes(target, current);
     if (!ch) return null;
     const scope = only ? new Set(only) : null;
-    const files = scope ? ch.files.filter((f) => scope.has(f.path)) : ch.files;
-    const toWrite = files.filter((f) => f.status !== 'A').map((f) => f.path); // in target, changed or deleted since
+    // Never outside the project directory, whatever a (persisted) list says.
+    const files = (scope ? ch.files.filter((f) => scope.has(f.path)) : ch.files).filter((f) => this.inScope(f.path));
+    const failed: string[] = [];
+    // A file whose folder now resolves outside the project (replaced by a symlink or junction) is not written: git replaces
+    // such a link on Linux, but smart does not rely on how each git build treats Windows junctions.
+    const toWrite = files.filter((f) => f.status !== 'A').map((f) => f.path).filter((p) => (this.writable(p) ? true : (failed.push(p), false)));
     const toRemove = files.filter((f) => f.status === 'A').map((f) => f.path); // created since the target
     let restored = 0;
     if (toWrite.length > 0) {
       const idx = join(this.tmp, 'restore-index');
       const env = { GIT_INDEX_FILE: idx };
+      // git writes these files itself: it refuses paths outside the work tree and replaces a folder that became a link
+      // with a real folder instead of writing through it.
       const read = await git(['read-tree', target], { cwd: this.root, env });
       if (read.code !== 0) return null;
       const out = await git(['checkout-index', '-f', '-z', '--stdin'], { cwd: this.root, env, input: toWrite.join('\0') + '\0' });
+      rmSync(idx, { force: true });
       if (out.code !== 0) return null;
       restored = toWrite.length;
-      rmSync(idx, { force: true });
     }
     let removed = 0;
     for (const rel of toRemove) {
+      const file = this.removable(rel);
+      if (!file) {
+        failed.push(rel);
+        continue;
+      }
       try {
-        unlinkSync(join(this.root, rel));
+        unlinkSync(file);
         removed += 1;
-        pruneEmptyDirs(this.root, rel);
-      } catch {
-        /* already gone */
+        this.pruneEmptyDirs(rel);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') failed.push(rel); // ENOENT: already gone, which is the goal
       }
     }
-    return { restored, removed };
+    return { restored, removed, failed };
+  }
+
+  /** Whether `rel` may be written: a plain path in scope whose folder (or nearest existing ancestor) is really inside the repository. */
+  private writable(rel: string): boolean {
+    if (unsafePathReason(rel, { platform: 'linux' }) || !this.inScope(rel)) return false;
+    try {
+      const root = realpathSync(this.root);
+      const folder = realPathOf(join(this.root, ...rel.split('/').slice(0, -1)));
+      return folder === root || insideRel(path.relative(root, folder));
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether a repo-relative path lies in the project directory smart runs in (the whole repository at the top). */
+  private inScope(rel: string): boolean {
+    return !this.prefix || rel.startsWith(`${this.prefix}/`);
+  }
+
+  /**
+   * Where to delete `rel` (a file a task created): only when its folder's real location is inside the repository. A folder
+   * that was replaced by a symlink or junction pointing elsewhere would otherwise make smart delete a file outside it.
+   * The file itself may be a link: unlinking removes the link, never its target.
+   */
+  private removable(rel: string): string | null {
+    if (unsafePathReason(rel, { platform: 'linux' }) || !this.inScope(rel)) return null; // git paths always use '/'
+    try {
+      const root = realpathSync(this.root);
+      const parts = rel.split('/');
+      const folder = realpathSync(join(this.root, ...parts.slice(0, -1)));
+      if (folder !== root && !insideRel(path.relative(root, folder))) return null;
+      return join(folder, parts.at(-1)!);
+    } catch {
+      return null; // the folder is gone, so the file is too
+    }
+  }
+
+  /** Remove now-empty parent folders of `rel`, innermost first, never the project directory itself or anything above it. */
+  private pruneEmptyDirs(rel: string): void {
+    const parts = rel.split('/').slice(0, -1);
+    const stop = this.prefix ? this.prefix.split('/').length : 0;
+    for (let n = parts.length; n > stop; n--) {
+      const dir = join(this.root, ...parts.slice(0, n));
+      try {
+        // Only a real, empty folder: never a link (removing a junction is fine, but its target must not be emptied).
+        if (lstatSync(dir).isSymbolicLink() || readdirSync(dir).length > 0) return;
+        rmdirSync(dir);
+      } catch {
+        return;
+      }
+    }
   }
 
   dispose(): void {
     if (this.tmp) rmSync(this.tmp, { recursive: true, force: true });
     this.available = false;
-  }
-}
-
-/** Remove now-empty parent directories of `rel` (a repo-relative posix path), innermost first, never above the root. */
-function pruneEmptyDirs(root: string, rel: string): void {
-  const parts = rel.split('/').slice(0, -1);
-  for (let n = parts.length; n > 0; n--) {
-    const dir = join(root, ...parts.slice(0, n));
-    try {
-      if (readdirSync(dir).length > 0) return;
-      rmdirSync(dir);
-    } catch {
-      return;
-    }
   }
 }
 

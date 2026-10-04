@@ -61,24 +61,47 @@ export class ChangeTracker {
     if (!ch || ch.files.length === 0) return [];
     // Kept with the conversation, so /undo and /diff still work after quitting and starting smart again here.
     const conv = this.h.conversation();
-    conv.undo = [...(conv.undo ?? []), { prompt, start: startTree, end }].slice(-20);
+    // Which repository and folder the snapshots are of: an entry is never applied anywhere else (see undo).
+    conv.undo = [...(conv.undo ?? []), { prompt, start: startTree, end, repo: this.h.cp.root, prefix: this.h.cp.prefix }].slice(-20);
     this.h.bus.emit({ type: 'changes', files: ch.files.map((f) => ({ ...f, path: this.fromRoot(f.path) })), insertions: ch.insertions, deletions: ch.deletions });
     return ch.files.filter((f) => f.status !== 'D').map((f) => this.fromRoot(f.path));
   }
 
-  /** Revert the working tree to how it was before the most recent task that changed files. */
-  async undo(): Promise<void> {
+  /**
+   * Revert the working tree to how it was before the most recent task that changed files. Refuses, without touching anything,
+   * when you have edited one of that task's files since (the edit would be lost) unless `force`, and when the entry was recorded
+   * for another repository or folder.
+   */
+  async undo(force = false): Promise<void> {
     const emit = this.h.bus.emit.bind(this.h.bus);
     if (this.h.isRunning()) return emit({ type: 'notice', level: 'warn', message: 'Cancel the running task (Esc) before undoing.' });
     if (!this.h.cp.available) return emit({ type: 'notice', level: 'warn', message: 'Undo needs a git repository. Run `git init` in this directory first.' });
     const conv = this.h.conversation();
     const entry = conv.undo?.at(-1);
     if (!entry) return emit({ type: 'notice', level: 'info', message: 'Nothing to undo.' });
+    if (!sameScope(entry, this.h.cp)) {
+      return emit({ type: 'notice', level: 'warn', message: `The last change recorded here was made in another repository location (${entry.repo}${entry.prefix ? `/${entry.prefix}` : ''}), so it is not undone here.` });
+    }
     // Only the files this task changed: an edit you made yourself to another file since then is not the task's to revert.
     const own = await this.h.cp.changes(entry.start, entry.end);
     const now = own ? await this.snap() : null;
+    if (own && now && !force) {
+      const mine = new Set(own.files.map((f) => f.path));
+      const since = await this.h.cp.changes(entry.end, now);
+      const edited = (since?.files ?? []).filter((f) => mine.has(f.path)).map((f) => this.fromRoot(f.path));
+      if (edited.length) {
+        return emit({
+          type: 'notice', level: 'warn',
+          message: `Not undone: ${edited.length === 1 ? 'a file' : `${edited.length} files`} that task changed ${edited.length === 1 ? 'was' : 'were'} edited after it (${edited.slice(0, 5).join(', ')}${edited.length > 5 ? ', …' : ''}), and undoing would discard those edits. \`/undo force\` reverts them anyway; \`/diff\` shows what the task changed.`,
+        });
+      }
+    }
     const r = own && now ? await this.h.cp.restore(entry.start, now, own.files.map((f) => f.path)) : null;
-    if (!r) return emit({ type: 'notice', level: 'warn', message: 'Could not restore the previous state (the snapshot may have been cleaned up by git gc).' });
+    if (!r) return emit({ type: 'notice', level: 'warn', message: 'Could not restore the previous state (the snapshot may have been cleaned up by git gc, or git failed part-way: check `git status`). The undo entry is kept.' });
+    if (r.failed.length) {
+      // Keep the entry: running /undo again retries once the file is free; nothing is reported as undone that was not.
+      return emit({ type: 'notice', level: 'warn', message: `Undo was incomplete: ${undoSummary(r.restored, r.removed)}, but could not put back ${r.failed.map((f) => this.fromRoot(f)).join(', ')} (in use, or its folder now points outside the project). Fix that and run /undo again.` });
+    }
     conv.undo = conv.undo?.slice(0, -1);
     // The task that was undone (not simply the latest: after a restart or a question in between they differ). Memory keeps a clipped prompt.
     const key = entry.prompt.replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -99,6 +122,13 @@ export class ChangeTracker {
     const text = await this.h.cp.diff(entry.start, entry.end);
     emit(text ? { type: 'diff', text } : { type: 'notice', level: 'warn', message: 'Could not compute the diff.' });
   }
+}
+
+/** Whether an undo entry was recorded for this repository and folder. Entries from before this was recorded are accepted. */
+function sameScope(entry: { repo?: string; prefix?: string }, cp: { root: string; prefix: string }): boolean {
+  if (entry.repo === undefined) return true;
+  const norm = (p: string) => (process.platform === 'win32' ? path.win32.resolve(p).toLowerCase() : path.resolve(p));
+  return norm(entry.repo) === norm(cp.root) && (entry.prefix ?? '') === cp.prefix;
 }
 
 const files = (n: number) => `${n} file${n === 1 ? '' : 's'}`;

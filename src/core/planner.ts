@@ -6,6 +6,8 @@ import { structuredFrom } from './json.js';
 import { modelFor, routeRole } from './router.js';
 import type { Classification, ModelTier, Plan, PlanStep, Usage } from './types.js';
 import { emptyUsage } from './types.js';
+import { unsafePathReason } from './paths.js';
+import { block, oneLine } from './text.js';
 
 export const PLANNER_SYSTEM = `You turn a coding request into a compact, ordered build plan that a cheaper model executes one step at a time. Every word costs tokens.
 Scope: deliver what was asked with sensible basics. Do not add extras the user did not request (no bonus features, docs, or tooling beyond what is needed to run and test it).
@@ -62,28 +64,72 @@ const PlanSchema = z.object({
   steps: z.array(StepSchema).min(1),
 });
 
-/** Validate and normalise raw planner output. Returns null when unusable. */
-export function parsePlan(raw: unknown, maxSteps: number): { plan: Plan; truncated: boolean } | null {
+/** Caps for model-written plan text: a step is a short instruction, not a document. */
+export const PLAN_LIMITS = { title: 120, instructions: 2000, summary: 300, items: 20, item: 200, files: 20, acceptance: 5 } as const;
+
+export interface ParsedPlan {
+  plan: Plan;
+  /** More steps were proposed than `maxSteps`. */
+  truncated: boolean;
+  /** File references dropped because they are not plain project paths (absolute, `..`, network, device names). */
+  droppedFiles: string[];
+  /** Steps dropped because they were empty or repeated an earlier one. */
+  droppedSteps: number;
+}
+
+/**
+ * Validate and normalise raw planner output. It is model output, so parsing as JSON proves nothing: every field is cleaned
+ * (no control characters, capped length), file references must be plain paths inside the project, and empty or repeated
+ * steps are dropped. Fields the schema does not have (a `tier`, a `model`) are ignored: the planner rates difficulty, smart
+ * picks models. Returns null when nothing usable is left.
+ */
+export function parsePlan(raw: unknown, maxSteps: number): ParsedPlan | null {
   const parsed = PlanSchema.safeParse(raw);
   if (!parsed.success) return null;
   const d = parsed.data;
-  const truncated = d.steps.length > maxSteps;
-  const steps: PlanStep[] = d.steps.slice(0, maxSteps).map((s, i) => ({
-    id: `s${i + 1}`, // always regenerate: model-supplied ids can collide
-    title: s.title.trim(),
-    instructions: s.instructions.trim(),
-    files: (s.files ?? []).map((f) => f.trim()).filter(Boolean),
-    acceptance: (s.acceptance ?? []).map((a) => a.trim()).filter(Boolean),
-    ...(s.difficulty ? { difficulty: s.difficulty } : {}),
-  }));
+  const droppedFiles: string[] = [];
+  const seen = new Set<string>();
+  const kept: Omit<PlanStep, 'id'>[] = [];
+  let droppedSteps = 0;
+  for (const s of d.steps) {
+    const title = oneLine(s.title, PLAN_LIMITS.title);
+    const instructions = block(s.instructions, PLAN_LIMITS.instructions);
+    const key = `${title.toLowerCase()}\n${instructions.toLowerCase()}`;
+    if (!title || !instructions || seen.has(key)) {
+      droppedSteps += 1;
+      continue;
+    }
+    seen.add(key);
+    const files: string[] = [];
+    for (const f of s.files ?? []) {
+      const p = oneLine(f, 300);
+      if (!p || files.includes(p)) continue;
+      if (unsafePathReason(p)) droppedFiles.push(p);
+      else if (files.length < PLAN_LIMITS.files) files.push(p);
+    }
+    kept.push({
+      title,
+      instructions,
+      files,
+      acceptance: (s.acceptance ?? []).map((a) => oneLine(a, PLAN_LIMITS.item)).filter(Boolean).slice(0, PLAN_LIMITS.acceptance),
+      ...(s.difficulty ? { difficulty: s.difficulty } : {}),
+    });
+  }
+  if (kept.length === 0) return null;
+  const truncated = kept.length > maxSteps;
+  // Always regenerate ids: model-supplied ids can collide.
+  const steps: PlanStep[] = kept.slice(0, maxSteps).map((s, i) => ({ id: `s${i + 1}`, ...s }));
+  const list = (xs: string[] | undefined) => (xs ?? []).map((x) => oneLine(x, PLAN_LIMITS.item)).filter(Boolean).slice(0, PLAN_LIMITS.items);
   return {
     plan: {
-      summary: d.summary?.trim() || steps[0]?.title || 'Plan',
-      features: d.features ?? [],
-      fileStructure: d.fileStructure ?? [],
+      summary: oneLine(d.summary ?? '', PLAN_LIMITS.summary) || steps[0]?.title || 'Plan',
+      features: list(d.features),
+      fileStructure: list(d.fileStructure),
       steps,
     },
     truncated,
+    droppedFiles,
+    droppedSteps,
   };
 }
 
@@ -147,11 +193,12 @@ export async function makePlan(prompt: string, classification: Classification, c
     });
     const parsed = parsePlan(structuredFrom(result), maxPlanSteps);
     if (!parsed) return { plan: singleStepPlan(prompt), usage: result.usage, warning: 'Planner output was malformed; running the task as a single step.' };
-    return {
-      plan: parsed.plan,
-      usage: result.usage,
-      warning: parsed.truncated ? `Plan trimmed to ${maxPlanSteps} steps.` : undefined,
-    };
+    const notes = [
+      parsed.truncated ? `Plan trimmed to ${maxPlanSteps} steps.` : '',
+      parsed.droppedSteps ? `Dropped ${parsed.droppedSteps} empty or repeated step${parsed.droppedSteps === 1 ? '' : 's'} from the plan.` : '',
+      parsed.droppedFiles.length ? `Ignored file references that are not plain project paths: ${parsed.droppedFiles.slice(0, 5).join(', ')}${parsed.droppedFiles.length > 5 ? ', …' : ''}.` : '',
+    ].filter(Boolean);
+    return { plan: parsed.plan, usage: result.usage, warning: notes.length ? notes.join(' ') : undefined };
   } catch (e) {
     if (e instanceof SmartError && (e.kind === 'claude' || e.kind === 'parse')) {
       return { plan: singleStepPlan(prompt), usage: emptyUsage(), warning: `Planning failed (${e.message}); running the task as a single step.` };

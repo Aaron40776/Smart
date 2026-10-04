@@ -19,15 +19,16 @@ import { makePlan, singleStepPlan } from './planner.js';
 import { ANSWER_UPGRADE_SCORE, route, routeRole, reviewerTier } from './router.js';
 import { reviewStep } from './review.js';
 import { gatherFiles, runStep } from './runner.js';
-import type { StepRecord, TaskRecord, Tracker } from './store/tracker.js';
+import { projectKey, type StepRecord, type TaskRecord, type Tracker } from './store/tracker.js';
 import { addUsage, emptyUsage, type Classification, type Limits, type ModelTier, type Plan, type PlanStep, type RouteDecision, type Usage } from './types.js';
 import { LimitsStore } from './store/limits.js';
-import { detectChecks, isDocsOnly, nextAttempt, runChecks, type Check, type ExecFn } from './verifier.js';
+import { detectChecks, isDocsOnly, runChecks, type Check, type ExecFn } from './verifier.js';
 import { makeRun } from './pipeline/calls.js';
 import { ChangeTracker } from './pipeline/changes.js';
 import { AccountLimits } from './pipeline/limits.js';
 import { plannerDownshift, routeWithSession, sessionTooBig } from './pipeline/session.js';
 import { forcedClassification, selectChecks, shouldReview, skippedRecord, stepBudget } from './pipeline/steps.js';
+import { afterFailure, callFailureKind, checkFailureKind, type FailureKind, type TaskFailure } from './pipeline/outcome.js';
 
 export interface PipelineDeps {
   run: RunClaudeFn;
@@ -69,11 +70,28 @@ export interface TaskSummary {
   steps: StepRecord[];
   classification?: Classification;
   plan?: Plan;
+  /** Why it did not finish (absent when ok). Drives `-p` JSON's `failure` and the exit code. */
+  failure?: TaskFailure;
 }
 
 /**
  * Orchestrates classify → plan → approve → execute → verify. It only talks to the outside
  * world through `deps` and the event bus, so any frontend can drive it.
+ *
+ * Task states (one task at a time; `running` guards re-entry):
+ *
+ *   start ─┬─ small talk ─────────────────────────────────────────────► respond ──► finish
+ *          ├─ /resume ─► (plan and done steps from the pending task) ─► execute
+ *          └─ classify ─┬─ answerable question ────────────────────────► respond ──► finish
+ *                       └─ plan? ─► dry run? ──────────────────────────────────────► finish (ok)
+ *                                   └─ approve? (multi-step plans) ─► execute
+ *   execute: each step not already done ─► attempt loop (below); the first step that does not finish ends the loop
+ *   finish:  summary snapshot (/undo, /diff), conversation memory, pending task for /resume, cost record, terminal event
+ *   any error or cancel ─► finish(aborted) and an `error` / `task:cancelled` event instead of `task:done`
+ *
+ * Attempt loop of one step: budget left? ─► run Claude ─► verify (checks) ─► review ─► done
+ *   on a failure its kind (pipeline/outcome.ts) decides: retry, escalate, stop (environment, budget) or give up.
+ *   Errors that are not about the step (auth, missing CLI, usage limit, overloaded) end the task and keep it resumable.
  */
 export class Pipeline {
   private forced: ModelTier | null = null;
@@ -110,6 +128,10 @@ export class Pipeline {
   private bgSnapshot: Promise<string | null> | null = null;
   /** Every Claude call goes through here so account usage reported in any stream is captured. */
   private readonly run: RunClaudeFn;
+  /** Why the last step that did not finish stopped (reset per task). */
+  private stepFailure: TaskFailure | undefined;
+  /** The step record being worked on, so a task that is aborted mid-step (usage limit, auth) still records it. */
+  private inFlight: StepRecord | null = null;
 
   constructor(
     private readonly config: SmartConfig,
@@ -126,8 +148,10 @@ export class Pipeline {
     });
     this.run = makeRun(deps.run, config, {
       onLimits: (windows, status) => this.limitsWatch.observe(windows, status),
-      onErrorUsage: (usage) => {
+      onErrorUsage: (usage, overhead) => {
         this.taskUsage = addUsage(this.taskUsage, usage);
+        // A failed classify, plan or review call still cost money: it belongs with that overhead, not with the coding steps.
+        if (overhead) this.overhead = addUsage(this.overhead, usage);
         this.bus.emit({ type: 'tokens', usage, sessionTotal: this.sessionTotal });
       },
       notice: (message) => this.bus.emit({ type: 'notice', level: 'warn', message }),
@@ -151,6 +175,9 @@ export class Pipeline {
   /** Change the permission mode for the rest of this session (`null` returns to the configured one). */
   setPermissionMode(mode: string | null): void {
     this.permOverride = mode;
+    if (this.permissionMode === 'bypassPermissions') {
+      this.bus.emit({ type: 'notice', level: 'warn', message: `Permissions are bypassed from now on: Claude Code can run any command in ${this.cwd} without asking.` });
+    }
   }
   get permissionMode(): string {
     return this.permOverride ?? this.config.runner.permissionMode;
@@ -176,7 +203,7 @@ export class Pipeline {
   /** Continue the last failed or cancelled task from its first unfinished step. */
   resumeTask(opts: Omit<TaskOptions, 'resume'> = {}): Promise<TaskSummary> {
     const pending = this.conv.pending;
-    if (!pending) throw new SmartError('internal', 'Nothing to resume: the last task finished or never got past planning.');
+    if (!pending) throw new SmartError('resume', 'Nothing to resume: the last task finished or never got past planning.');
     return this.runTask(pending.prompt, { ...opts, resume: true, autoApprove: true });
   }
 
@@ -234,6 +261,8 @@ export class Pipeline {
     const startedAt = (this.deps.now?.() ?? new Date()).toISOString();
     const summary: TaskSummary = { taskId, ok: false, cancelled: false, dryRun, totals: emptyUsage(), steps: [] };
     this.overhead = emptyUsage();
+    this.stepFailure = undefined;
+    this.inFlight = null;
     this.changes.fresh = null;
     const touched: string[] = [];
     let startTree: string | null = null;
@@ -276,6 +305,8 @@ export class Pipeline {
         classification = resumed.classification;
         plan = resumed.plan;
         for (const id of resumed.doneStepIds) doneIds.add(id);
+        // What the finished steps changed: the next step is told, as it would have been in the original run.
+        for (const f of resumed.files ?? []) if (!touched.includes(f)) touched.push(f);
         summary.classification = classification;
         summary.plan = plan;
         for (const st of ['classify', 'plan', 'approve'] as const) stage(st, 'skipped');
@@ -361,9 +392,13 @@ export class Pipeline {
       doneRef.executing = true;
       const active = plan.steps.filter((s) => !s.skipped);
       let failed = false;
+      let first = true;
       for (const [index, step] of active.entries()) {
         if (doneIds.has(step.id)) continue;
-        const rec = await this.runOneStep({ plan, step, index, total: active.length, classification, touched, current: (s) => at(s), prompt, cursor, referenced });
+        // The first step that runs now (not necessarily index 0: /resume starts later) gets what you referenced with @path.
+        const rec = await this.runOneStep({ plan, step, index, total: active.length, classification, touched, current: (s) => at(s), prompt, cursor, referenced, first });
+        this.inFlight = null;
+        first = false;
         summary.steps.push(rec);
         if (rec.outcome === 'done') doneIds.add(step.id);
         if (rec.outcome !== 'done') {
@@ -374,11 +409,19 @@ export class Pipeline {
       }
       for (const s of plan.steps.filter((s) => s.skipped)) summary.steps.push(skippedRecord(s));
       summary.ok = !failed;
+      if (failed) summary.failure = this.stepFailure ?? { kind: 'model', message: 'A step did not finish.' };
       stage('execute', failed ? 'failed' : 'done');
       return await this.finish(summary, { startedAt, prompt, touched, startTree, doneIds });
     } catch (e) {
       summary.ok = false;
       if (isCancelled(e)) summary.cancelled = true;
+      const stepFailure = this.stepFailure as TaskFailure | undefined; // set by runOneStep meanwhile
+      const aborted = this.inFlight as StepRecord | null;
+      if (aborted && !summary.steps.includes(aborted)) summary.steps.push({ ...aborted, outcome: summary.cancelled ? 'cancelled' : 'failed' });
+      this.inFlight = null;
+      summary.failure = summary.cancelled
+        ? { kind: 'cancelled', message: 'Cancelled.', ...(stepFailure?.stepId ? { stepId: stepFailure.stepId } : {}) }
+        : e instanceof SmartError ? { kind: e.kind, message: e.message } : { kind: 'internal', message: (e as Error)?.message ?? String(e) };
       // Save the state (checkpoint, /resume, cost record) BEFORE telling the frontend the task is over: a one-shot run exits
       // as soon as it sees the terminal event, and would otherwise lose all of it.
       const out = await this.finish(summary, { startedAt, prompt, touched, startTree, aborted: true, doneIds: doneRef.ids, executing: doneRef.executing });
@@ -466,6 +509,8 @@ export class Pipeline {
       if (isCancelled(e)) throw e;
       if (e instanceof SmartError && e.kind !== 'claude') throw e;
       emit({ type: 'step:failed', stepId: step.id, error: (e as Error).message, at: this.now() });
+      rec.failure = callFailureKind(e);
+      summary.failure = { kind: rec.failure, message: (e as Error).message, stepId: step.id };
     }
     summary.steps.push(rec);
     summary.ok = rec.outcome === 'done';
@@ -481,7 +526,7 @@ export class Pipeline {
     const perm = resolvePermissionMode(this.config.runner.permissionMode, this.deps.uid ?? process.getuid?.());
     if (perm.warning) this.bus.emit({ type: 'notice', level: 'warn', message: perm.warning });
     else if (perm.mode === 'bypassPermissions') {
-      this.bus.emit({ type: 'notice', level: 'warn', message: `Permissions are bypassed: Claude Code can run any command in ${this.cwd}.` });
+      this.bus.emit({ type: 'notice', level: 'warn', message: `Permissions are bypassed (runner.permissionMode): Claude Code can run any command in ${this.cwd} without asking.` });
     }
   }
 
@@ -496,7 +541,7 @@ export class Pipeline {
 
   /** See plannerDownshift. */
   private plannerDownshift(classification: Classification, score: number): ModelTier | null {
-    return plannerDownshift(classification, score, this.limitsWatch.current, this.config);
+    return plannerDownshift(classification, score, this.limitsWatch.current, this.config, this.now());
   }
 
 
@@ -534,7 +579,7 @@ export class Pipeline {
     try {
       const tasks = this.deps.tracker?.load() ?? [];
       this.costTable = buildCostTable(tasks);
-      return this.deps.tracker ? buildHistory(tasks) : undefined;
+      return this.deps.tracker ? buildHistory(tasks, this.now(), { topTier: this.config.escalation.ladder.at(-1) }) : undefined;
     } catch {
       return undefined; // learning is a bonus: never let it stop a task
     }
@@ -600,7 +645,7 @@ export class Pipeline {
   /** Returns a description of the problems, or undefined when the step passes (or could not be reviewed). */
   private async review(task: string, step: PlanStep, files: string[], signal: AbortSignal, score?: number): Promise<string | undefined> {
     const emit = this.bus.emit.bind(this.bus);
-    const contents = gatherFiles(this.cwd, files, this.config.limits.maxContextBytes);
+    const contents = gatherFiles(this.cwd, files, this.config.limits.maxContextBytes, { skipSecrets: true });
     if (contents.length === 0) return undefined;
     // A step rated hard is checked by a stronger reviewer than the one that would check a rename.
     const tier = reviewerTier(score, this.config);
@@ -631,9 +676,9 @@ export class Pipeline {
     });
   }
 
-  /** Revert the working tree to how it was before the most recent task that changed files. */
-  undo(): Promise<void> {
-    return this.changes.undo();
+  /** Revert the working tree to how it was before the most recent task that changed files (`force`: even over later edits). */
+  undo(force = false): Promise<void> {
+    return this.changes.undo(force);
   }
 
   /** Publish a unified diff of the most recent task that changed files. */
@@ -661,6 +706,8 @@ export class Pipeline {
     cursor: { tree: string | null };
     /** Files the user referenced with @path (given to the first step). */
     referenced: import('./runner.js').FileContext[];
+    /** The first step this run executes (index 0 normally, a later one for /resume). */
+    first: boolean;
   }): Promise<StepRecord> {
     const { plan, step, index, total, classification, touched } = a;
     const stepStart = a.cursor.tree;
@@ -675,10 +722,22 @@ export class Pipeline {
       stepId: step.id, title: step.title, model: first.model, tier: first.tier, attempts: 0, escalated: false, usage: emptyUsage(), outcome: 'failed',
       ...(first.score !== undefined ? { rated: { tier: first.tier, ...(startEffort ? { effort: startEffort } : {}), score: first.score } } : {}),
     };
+    this.inFlight = rec;
 
     let tier = first.tier;
     let failuresOnTier = 0;
     let failure: string | undefined;
+    /** Why the latest attempt failed (see pipeline/outcome.ts), and how many attempts failed for reasons around the work. */
+    let kind: FailureKind = 'model';
+    let environmentFailures = 0;
+    let fromCheck = false;
+    const fail = (k: FailureKind, message: string): StepRecord => {
+      rec.outcome = k === 'cancelled' ? 'cancelled' : 'failed';
+      rec.failure = k;
+      this.stepFailure = { kind: k, message, stepId: step.id };
+      emit({ type: 'step:failed', stepId: step.id, error: k === 'cancelled' ? 'Cancelled' : message, at: this.now() });
+      return rec;
+    };
     /** The decision the current model was chosen with. Retries adjust the effort from THIS each time, so they never compound. */
     let base = first;
     let decision: RouteDecision;
@@ -686,11 +745,9 @@ export class Pipeline {
     for (;;) {
       const cap = this.config.limits.maxBudgetUsdPerTask;
       if (cap && this.taskUsage.costUsd >= cap) {
-        rec.outcome = 'failed';
         const msg = `Task budget of $${cap} reached (spent $${this.taskUsage.costUsd.toFixed(2)}); stopping.`;
         emit({ type: 'notice', level: 'warn', message: msg });
-        emit({ type: 'step:failed', stepId: step.id, error: msg });
-        return rec;
+        return fail('budget', msg);
       }
       rec.attempts += 1;
       rec.tier = tier;
@@ -705,15 +762,18 @@ export class Pipeline {
       // One persisted Claude Code session per conversation: steps and follow-up tasks resume it.
       const resuming = this.config.session.resume && this.conv.sessionId !== null;
       const sessionId = this.config.session.resume ? (this.conv.sessionId ?? randomUUID()) : undefined;
-      const memory = !resuming && index === 0 ? renderMemory(this.conv) : '';
-      const note = index === 0 ? this.notes.join(' ') : '';
+      // A new Claude Code session knows nothing: give it the conversation so far, whichever step this is (the first of a task,
+      // the step /resume continues with, any step when sessions are off, or a step whose saved session was lost).
+      const memory = !resuming ? renderMemory(this.conv) : '';
+      // One-off notes (e.g. "the user undid your changes") go to whichever step runs next, once.
+      const note = this.notes.join(' ');
 
       let ok = false;
       let context = 0;
       this.changes.fresh = null; // this attempt may change files before any snapshot sees them
       try {
         const res = await runStep({
-          plan, step, index, total, touchedFiles: touched, failure, memory: memory || undefined, note: note || undefined, referenced: index === 0 ? a.referenced : undefined,
+          plan, step, index, total, touchedFiles: touched, failure, memory: memory || undefined, note: note || undefined, referenced: a.first ? a.referenced : undefined,
           session: sessionId ? { id: sessionId, resume: resuming } : undefined,
           effort,
           maxBudgetUsd: stepBudget(this.config, this.taskUsage.costUsd),
@@ -765,11 +825,22 @@ export class Pipeline {
         if (signal.aborted) throw cancelled();
         if (checks.length > 0) this.changes.fresh = null; // a check can write files (a formatter, a build)
         // This attempt's own problem (`failure` still holds the previous attempt's text, which was already sent to the model).
-        let problem: string | undefined = v.ok ? undefined : `${v.failure?.command} failed:\n${v.failure?.output}`;
+        let problem: string | undefined;
+        if (!v.ok && v.failure) {
+          kind = checkFailureKind(v.failure);
+          fromCheck = true;
+          problem = kind === 'environment'
+            ? `The check \`${v.failure.command}\` could not run (${v.failure.code === null ? 'it did not start' : `exit code ${v.failure.code}: command not found`}). That is not something a model can fix: install what it needs, or adjust verify.commands, then /resume.\n${v.failure.output}`
+            : `${v.failure.command} failed:\n${v.failure.output}`;
+        }
         let reviewed = false;
         if (v.ok && shouldReview(this.config, classification, plan.steps.length, checks.length, stepFiles)) {
           a.current('verify');
           problem = await this.review(a.prompt, step, stepFiles, signal, base.score);
+          if (problem) {
+            kind = 'review';
+            fromCheck = false;
+          }
           reviewed = true;
         }
         emit({ type: 'stage', stage: 'verify', status: checks.length === 0 && !reviewed ? 'skipped' : problem ? 'failed' : 'done' });
@@ -777,11 +848,9 @@ export class Pipeline {
         if (problem) failure = problem;
         else ok = true;
       } catch (e) {
-        if (isCancelled(e)) {
-          rec.outcome = 'cancelled';
-          emit({ type: 'step:failed', stepId: step.id, error: 'Cancelled', at: this.now() });
-          return rec;
-        }
+        if (isCancelled(e)) return fail('cancelled', 'Cancelled');
+        // The call's spend counts for the step too (the task total already has it, see makeRun).
+        if (e instanceof SmartError && e.usage) rec.usage = addUsage(rec.usage, e.usage);
         // The saved Claude Code session is gone (cleaned up, other machine): start a new one, carrying our memory.
         if (e instanceof SmartError && e.kind === 'claude' && resuming && /No conversation found/i.test(e.message)) {
           this.conv.sessionId = null;
@@ -791,8 +860,13 @@ export class Pipeline {
           continue;
         }
         // Auth / missing CLI / internal problems will not fix themselves: abort the task.
-        if (e instanceof SmartError && e.kind !== 'claude') throw e;
+        if (e instanceof SmartError && e.kind !== 'claude') {
+          rec.failure = e.kind === 'limit' ? 'limit' : 'environment';
+          throw e;
+        }
         failure = (e as Error).message;
+        kind = callFailureKind(e);
+        fromCheck = false;
       }
 
       if (ok) {
@@ -801,13 +875,16 @@ export class Pipeline {
         return rec;
       }
 
-      failuresOnTier += 1;
-      // A forced model is a user decision: retry it, but never silently switch to another.
-      const next = this.forced ? (failuresOnTier <= this.config.escalation.retriesPerModel ? ({ action: 'retry', tier } as const) : ({ action: 'give_up' } as const)) : nextAttempt({ tier, failuresOnTier }, this.config);
-      if (next.action === 'give_up') {
-        rec.outcome = 'failed';
-        emit({ type: 'step:failed', stepId: step.id, error: failure ?? 'failed', at: this.now() });
-        return rec;
+      // A failure around the work (Claude Code did not start) is retried as is: no more effort, no bigger model.
+      if (kind === 'environment') {
+        environmentFailures += 1;
+        rec.environmentRetries = environmentFailures;
+      } else failuresOnTier += 1;
+      // A forced model is a user decision: retry it, but never silently switch to another (see afterFailure).
+      const next = afterFailure({ kind, tier, failuresOnTier, environmentFailures, fromCheck, forced: this.forced !== null, config: this.config });
+      if (next.action === 'stop' || next.action === 'give_up') {
+        if (next.action === 'stop' && kind === 'budget') emit({ type: 'notice', level: 'warn', message: failure ?? 'The budget ran out.' });
+        return fail(kind, failure ?? 'failed');
       }
       if (next.action === 'escalate') {
         rec.escalated = true;
@@ -844,7 +921,7 @@ export class Pipeline {
     if (!summary.dryRun) {
       const unfinished = !f.keepPending && !summary.ok && summary.plan && summary.classification && (f.executing || summary.steps.some((x) => x.outcome !== 'skipped'));
       if (unfinished) {
-        this.conv.pending = { prompt, classification: summary.classification!, plan: summary.plan!, doneStepIds: [...(f.doneIds ?? [])], at: startedAt };
+        this.conv.pending = { prompt, classification: summary.classification!, plan: summary.plan!, doneStepIds: [...(f.doneIds ?? [])], files: f.touched.slice(0, 50), at: startedAt };
       } else if (summary.ok && !f.keepPending) {
         delete this.conv.pending;
       }
@@ -857,7 +934,7 @@ export class Pipeline {
     if (this.deps.tracker && summary.totals.costUsd + summary.totals.outputTokens > 0) {
       const record: TaskRecord = {
         id: summary.taskId, startedAt, prompt, classification: summary.classification, overhead,
-        steps: summary.steps, totals: summary.totals, ok: summary.ok,
+        steps: summary.steps, totals: summary.totals, ok: summary.ok, project: projectKey(this.cwd),
       };
       const err = this.deps.tracker.append(record);
       if (!err) this.lastTaskId = { id: summary.taskId, steps: summary.steps };
@@ -867,7 +944,7 @@ export class Pipeline {
     this.release();
     if (!aborted) {
       this.bus.emit({ type: 'stage', stage: 'done', status: summary.ok ? 'done' : 'failed' });
-      this.bus.emit({ type: 'task:done', taskId: summary.taskId, totals: summary.totals, ok: summary.ok, at: this.now() });
+      this.bus.emit({ type: 'task:done', taskId: summary.taskId, totals: summary.totals, ok: summary.ok, at: this.now(), ...(summary.failure ? { failure: summary.failure.kind } : {}) });
     }
     return summary;
   }

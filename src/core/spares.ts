@@ -40,6 +40,7 @@ export class Spares {
     const key = this.keyOf(o);
     if (this.disposed || this.ready.has(key)) return;
     const cmd = this.command();
+    if (cmd.missing && this.spawnFn === nodeSpawn) return; // not installed: never start a bare name (see which.ts)
     let child: ChildProcess;
     try {
       child = this.spawnFn(cmd.cmd, [...cmd.prefix, ...buildArgs({ ...o, streamInput: true })], { cwd: o.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: spawnEnv(o) });

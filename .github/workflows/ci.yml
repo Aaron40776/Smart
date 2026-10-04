@@ -3,6 +3,12 @@ on:
   push:
     branches: [main]
   pull_request:
+# Read-only token: CI only reads the repository.
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   check:
     runs-on: ${{ matrix.os }}
@@ -21,6 +27,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      # Includes the simulated routing benchmark's reproducibility tests; no test calls the real Claude Code.
       - run: npm test
       - run: npm run build
       - name: install.ps1 parses in Windows PowerShell 5.1
@@ -29,12 +36,29 @@ jobs:
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors)
           if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+      # Installs this very commit (SMART_REPO is the checkout, SMART_COMMIT must match), with dependency install scripts off.
       - name: install.ps1 installs smart
         if: matrix.node == 22
         shell: powershell
         env:
           SMART_DIR: ${{ runner.temp }}\smart-install
+          SMART_REPO: ${{ github.workspace }}
+          SMART_COMMIT: ${{ github.sha }}
         run: |
           Get-Content -Raw .\install.ps1 | Invoke-Expression
           smart --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: install.ps1 never discards local changes
+        if: matrix.node == 22
+        shell: powershell
+        env:
+          SMART_DIR: ${{ runner.temp }}\smart-install
+          SMART_REPO: ${{ github.workspace }}
+        run: |
+          $readme = Join-Path $env:SMART_DIR 'README.md'
+          Add-Content $readme 'a local edit'
+          $out = Get-Content -Raw .\install.ps1 | Invoke-Expression *>&1 | Out-String
+          if ((Get-Content -Raw $readme) -notmatch 'a local edit') { Write-Host $out; throw 'the installer discarded a local change' }
+          if ($out -notmatch 'Nothing was changed') { Write-Host $out; throw 'the installer did not refuse a folder with local changes' }
+      - name: npm package contains only what it should
+        run: node scripts/check-pack.mjs

@@ -11,7 +11,7 @@ import { applyLimitPressure } from '../usage.js';
  * step is routed on its own merits, so a single escalated step cannot drag the rest up.
  */
 export function routeWithSession(decision: RouteDecision, s: { conv: Conversation; limits: Limits | null; config: SmartConfig; nowMs: number }): RouteDecision {
-  const pressured = applyLimitPressure(decision, s.limits, s.config);
+  const pressured = applyLimitPressure(decision, s.limits, s.config, s.nowMs);
   const followUp = s.conv.tasks.length > 0 && s.conv.sessionId !== null;
   const out = s.config.session.resume && followUp ? applyWarmCache(pressured, s.conv, s.nowMs, s.config) : pressured;
   // If a rule swapped the model, the rated effort belongs to the model that is no longer used.
@@ -19,9 +19,9 @@ export function routeWithSession(decision: RouteDecision, s: { conv: Conversatio
 }
 
 /** While an account usage window is nearly used up, plan with Sonnet instead of the (heavier) configured planner model. */
-export function plannerDownshift(classification: Classification, score: number, limits: Limits | null, config: SmartConfig): ModelTier | null {
+export function plannerDownshift(classification: Classification, score: number, limits: Limits | null, config: SmartConfig, nowMs: number = Date.now()): ModelTier | null {
   const tier = plannerTier(classification, config, score);
-  const probe = applyLimitPressure({ tier, model: config.models[tier], reason: 'planner', source: 'complexity' }, limits, config);
+  const probe = applyLimitPressure({ tier, model: config.models[tier], reason: 'planner', source: 'complexity' }, limits, config, nowMs);
   return probe.tier !== tier ? probe.tier : null;
 }
 

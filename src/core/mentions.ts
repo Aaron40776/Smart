@@ -1,6 +1,6 @@
-import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { statSync } from 'node:fs';
 import { folderFiles } from './files.js';
+import { resolveInside } from './paths.js';
 import { gatherFiles, type FileContext } from './runner.js';
 
 const PAIRS: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
@@ -27,14 +27,11 @@ export function extractMentions(prompt: string): string[] {
   return out;
 }
 
-/** A folder inside the project (a symlink out of it, or a path outside, is not). */
+/** A folder inside the project (a symlink out of it, a path outside, or a network path is not). */
 function projectFolder(cwd: string, p: string): string | null {
+  const inside = resolveInside(cwd, p, { allowAbsolute: true });
   try {
-    const root = realpathSync(cwd);
-    const real = realpathSync(resolve(cwd, p));
-    const rel = relative(root, real);
-    if (rel.startsWith('..') || isAbsolute(rel) || !statSync(real).isDirectory()) return null;
-    return rel.split(sep).join('/');
+    return inside && statSync(inside.abs).isDirectory() ? inside.rel : null;
   } catch {
     return null;
   }
@@ -60,5 +57,6 @@ export function resolveMentions(cwd: string, prompt: string, maxBytes: number): 
     folders.push({ path: name, content: `Folder ${name}: ${inside.length}${more ? '+' : ''} file${inside.length === 1 ? '' : 's'}\n${inside.join('\n')}`, truncated: more });
   }
   const used = folders.reduce((n, f) => n + f.content.length, 0);
-  return [...folders, ...gatherFiles(cwd, files, Math.max(0, maxBytes - used))];
+  // Paths you typed: an absolute path inside the project is fine, and so is a secret file you named on purpose.
+  return [...folders, ...gatherFiles(cwd, files, Math.max(0, maxBytes - used), { allowAbsolute: true })];
 }

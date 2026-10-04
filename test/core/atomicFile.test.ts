@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { lockBusy, quarantineCorrupt, withFileLock, writeFileAtomic } from '../../src/core/store/atomicFile.js';
+import { acquireLock, LockError, lockBusy, quarantineCorrupt, withFileLock, writeFileAtomic } from '../../src/core/store/atomicFile.js';
+import { ConversationStore, newConversation } from '../../src/core/store/conversation.js';
+import { Tracker } from '../../src/core/store/tracker.js';
+import { emptyUsage } from '../../src/core/types.js';
 import { projectRelative } from '../../src/core/runner.js';
 import { InputHistory } from '../../src/core/store/inputHistory.js';
 
@@ -58,6 +61,86 @@ describe('withFileLock', () => {
   }, 60_000);
 });
 
+describe('withFileLock: never runs unprotected', () => {
+  const held = (f: string, owner: object | null) => {
+    mkdirSync(`${f}.lock`);
+    if (owner) writeFileSync(join(`${f}.lock`, 'owner.json'), JSON.stringify(owner));
+  };
+
+  it('does not run the function while another live process holds the lock, and says so', () => {
+    const f = join(tmp(), 'x.json');
+    held(f, { pid: 4242, host: hostname(), token: 't', at: Date.now() });
+    let ran = false;
+    const t0 = Date.now();
+    expect(() => withFileLock(f, () => { ran = true; }, { waitMs: 150, alive: () => true })).toThrow(LockError);
+    expect(ran).toBe(false);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(140);
+    expect(existsSync(`${f}.lock`)).toBe(true); // the holder's lock is left alone
+  });
+
+  it('takes over at once from an owner on this machine that is no longer running', () => {
+    const f = join(tmp(), 'x.json');
+    held(f, { pid: 4242, host: hostname(), token: 't', at: Date.now() });
+    expect(withFileLock(f, () => 'ran', { waitMs: 50, alive: () => false })).toBe('ran');
+    expect(existsSync(`${f}.lock`)).toBe(false);
+  });
+
+  it('a fresh lock from another machine (shared folder) is waited for, not taken over', () => {
+    const f = join(tmp(), 'x.json');
+    held(f, { pid: 1, host: 'some-other-host', token: 't', at: Date.now() });
+    expect(() => withFileLock(f, () => 'ran', { waitMs: 80, alive: () => false })).toThrow(LockError);
+  });
+
+  it('an owner-less lock (older smart, or a crash right after creating it) is only taken over once it is old', () => {
+    const f = join(tmp(), 'x.json');
+    held(f, null);
+    expect(() => withFileLock(f, () => 'ran', { waitMs: 80 })).toThrow(LockError);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${f}.lock`, old, old);
+    expect(withFileLock(f, () => 'ran', { waitMs: 80 })).toBe('ran');
+  });
+
+  it('fails without running when no lock can be made at all (the folder cannot exist)', () => {
+    const d = tmp();
+    writeFileSync(join(d, 'not-a-dir'), '');
+    let ran = false;
+    expect(() => withFileLock(join(d, 'not-a-dir', 'x.json'), () => { ran = true; })).toThrow(LockError);
+    expect(ran).toBe(false);
+  });
+
+  it('release never removes a lock that is no longer its own (taken over while it was paused)', () => {
+    const f = join(tmp(), 'x.json');
+    const release = acquireLock(f);
+    writeFileSync(join(`${f}.lock`, 'owner.json'), JSON.stringify({ pid: 1, host: hostname(), token: 'someone-else', at: Date.now() }));
+    release();
+    expect(existsSync(`${f}.lock`)).toBe(true);
+  });
+
+  it('records its owner, so a crash can be recognised', () => {
+    const f = join(tmp(), 'x.json');
+    withFileLock(f, () => {
+      const owner = JSON.parse(readFileSync(join(`${f}.lock`, 'owner.json'), 'utf8')) as { pid: number; host: string };
+      expect(owner.pid).toBe(process.pid);
+      expect(owner.host).toBe(hostname());
+    });
+  });
+
+  it('the stores report a lock they could not take instead of writing unprotected', () => {
+    const d = tmp();
+    const hist = join(d, 'history.json');
+    held(hist, { pid: process.ppid, host: hostname(), token: 't', at: Date.now() });
+    const tracker = new Tracker(hist);
+    const record = { id: 't1', startedAt: new Date().toISOString(), prompt: 'p', overhead: emptyUsage(), steps: [], totals: emptyUsage(), ok: true };
+    // The default wait is 5 s; make the holder look alive and just check the message names the problem.
+    const err = tracker.append(record);
+    expect(err).toMatch(/in use by another smart process/);
+    expect(existsSync(hist)).toBe(false);
+    const convs = join(d, 'conversations.json');
+    held(convs, { pid: process.ppid, host: hostname(), token: 't', at: Date.now() });
+    expect(new ConversationStore(convs).save(d, newConversation())).toMatch(/in use by another smart process/);
+  }, 20_000);
+});
+
 describe('writeFileAtomic / quarantineCorrupt', () => {
   it('creates missing directories, replaces the file whole and leaves no temp files behind', () => {
     const d = tmp();
@@ -66,6 +149,20 @@ describe('writeFileAtomic / quarantineCorrupt', () => {
     writeFileAtomic(f, '{"a":2}');
     expect(readFileSync(f, 'utf8')).toBe('{"a":2}');
     expect(readdirSync(join(d, 'deep', 'er'))).toEqual(['x.json']);
+  });
+
+  it.runIf(process.platform !== 'win32')('writes owner-only files (history holds your prompts)', () => {
+    const f = join(tmp(), 'x.json');
+    writeFileAtomic(f, '{}');
+    expect(statSync(f).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes its temp file and keeps the old content when the final rename fails', () => {
+    const d = tmp();
+    const f = join(d, 'target');
+    mkdirSync(join(f, 'occupied'), { recursive: true }); // a non-empty folder where the file should go
+    expect(() => writeFileAtomic(f, 'x')).toThrow();
+    expect(readdirSync(d)).toEqual(['target']);
   });
 
   it('moves a corrupt file aside and does not throw when there is nothing to move', () => {

@@ -16,8 +16,8 @@ export const STARTER = {
     maxBudgetUsdPerTask: null,
   },
   runner: {
-    '//': 'bypassPermissions lets steps run any command; acceptEdits is stricter',
-    permissionMode: 'bypassPermissions',
+    '//': 'acceptEdits: Claude Code edits files; other tools (shell commands) only where your Claude Code permission rules allow them. bypassPermissions lets steps run any command unasked: choose it on purpose, in your global config, for projects you trust.',
+    permissionMode: 'acceptEdits',
   },
 };
 

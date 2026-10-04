@@ -12,7 +12,8 @@ describe('config', () => {
     const c = defaultConfig();
     expect(c.routing.trivial).toBe('haiku');
     expect(c.routing.planner).toBe('opus');
-    expect(c.runner.permissionMode).toBe('bypassPermissions');
+    // Safe by default: edits only; commands need your own Claude Code permission rules or an explicit bypassPermissions.
+    expect(c.runner.permissionMode).toBe('acceptEdits');
     expect(c.escalation.ladder).toEqual(['haiku', 'sonnet', 'opus']);
   });
 

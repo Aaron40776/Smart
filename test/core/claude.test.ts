@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { buildArgs, resolveClaudeCommand, resolvePermissionMode, runClaude, StreamParser, type ClaudeStreamEvent } from '../../src/core/claude.js';
+import { assertFound, buildArgs, resolveClaudeCommand, resolvePermissionMode, runClaude, StreamParser, type ClaudeStreamEvent } from '../../src/core/claude.js';
 import { SmartError } from '../../src/core/errors.js';
 
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
@@ -223,6 +223,9 @@ describe('resolveClaudeCommand', () => {
   it('honours SMART_CLAUDE_BIN', () => {
     expect(resolveClaudeCommand('win32', { SMART_CLAUDE_BIN: 'D:\\c.exe' }, () => false)).toEqual({ cmd: 'D:\\c.exe', prefix: [] });
   });
+  it('runs a JavaScript SMART_CLAUDE_BIN through node (Windows cannot start a .mjs itself)', () => {
+    expect(resolveClaudeCommand('win32', { SMART_CLAUDE_BIN: 'C:\\fake-claude.mjs' }, () => false)).toEqual({ cmd: process.execPath, prefix: ['C:\\fake-claude.mjs'] });
+  });
   it('finds claude.exe on the Windows PATH', () => {
     expect(win(['C:\\Tools\\claude.exe'])).toEqual({ cmd: 'C:\\Tools\\claude.exe', prefix: [] });
   });
@@ -231,7 +234,83 @@ describe('resolveClaudeCommand', () => {
     const cli = `${dir}\\node_modules\\@anthropic-ai\\claude-code\\cli.js`;
     expect(win([`${dir}\\claude.cmd`, cli])).toEqual({ cmd: process.execPath, prefix: [cli] });
   });
-  it('falls back to plain `claude` when nothing is found', () => {
-    expect(win([])).toEqual({ cmd: 'claude', prefix: [] });
+  it('reports Claude Code as missing when nothing is found, instead of starting a bare name', () => {
+    // A bare `claude` on Windows would be looked up in the project folder first (a planted claude.exe would run).
+    expect(win([])).toEqual({ cmd: 'claude', prefix: [], missing: true });
+    expect(() => assertFound(win([]))).toThrow(/not found/);
+    expect(() => assertFound(win(['C:\\Tools\\claude.exe']))).not.toThrow();
+  });
+  it('ignores relative PATH entries, which would mean the project folder', () => {
+    expect(win(['.\\claude.exe', 'claude.exe', 'bin\\claude.exe'], '.;;bin;C:\\Tools')).toEqual({ cmd: 'claude', prefix: [], missing: true });
+    expect(win(['C:\\Tools\\claude.exe'], '.;C:\\Tools')).toEqual({ cmd: 'C:\\Tools\\claude.exe', prefix: [] });
+  });
+});
+
+describe('argument boundaries', () => {
+  it('never puts the prompt on the command line, and keeps flag-like values paired with their option', () => {
+    const hostile = '--dangerously-skip-permissions --permission-mode bypassPermissions "; rm -rf ~"';
+    const args = buildArgs({ prompt: hostile, model: 'sonnet', cwd: '.', appendSystemPrompt: '--append-me', systemPrompt: '-x', permissionMode: 'acceptEdits' });
+    expect(args).not.toContain(hostile);
+    expect(args.join(' ')).not.toContain('rm -rf');
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe('--append-me');
+    expect(args[args.indexOf('--system-prompt') + 1]).toBe('-x');
+    expect(args.filter((a) => a === '--permission-mode')).toHaveLength(1);
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('acceptEdits');
+  });
+
+  it('sends the prompt over stdin, verbatim, with no shell in between', async () => {
+    const hostile = '$(touch pwned) `id` & del /q *';
+    let stdin = '';
+    let spawnOpts: { shell?: unknown } | undefined;
+    const spawnImpl = ((_cmd: string, _args: string[], opts: { shell?: unknown }) => {
+      spawnOpts = opts;
+      const c = (fakeSpawn(() => undefined) as unknown as () => FakeChild)();
+      c.stdin.on('data', (d: Buffer) => { stdin += d.toString(); });
+      setImmediate(() => {
+        c.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's' })}\n`);
+        c.emit('close', 0);
+      });
+      return c;
+    }) as unknown as typeof import('node:child_process').spawn;
+    await runClaude({ prompt: hostile, model: 'haiku', cwd: '.', spawnImpl });
+    expect(stdin).toBe(hostile);
+    expect(spawnOpts?.shell).toBeUndefined();
+  });
+});
+
+describe('runClaude start-up timeout', () => {
+  it('ends a claude that writes nothing at all, and says the call never reached the model', async () => {
+    let child!: FakeChild;
+    const spawnImpl = fakeSpawn((c) => { child = c; }); // never writes anything
+    const err = await runClaude({ prompt: 'hi', model: 'haiku', cwd: '.', spawnImpl, startupTimeoutMs: 50 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SmartError);
+    expect((err as SmartError).message).toMatch(/no output within 0 s|no output within/);
+    expect((err as SmartError).noOutput).toBe(true);
+    expect(child.killed).toContain('SIGKILL');
+  });
+
+  it('a process that has started writing is never cut off by the start-up limit', async () => {
+    const spawnImpl = fakeSpawn((c) => {
+      c.stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init', model: 'haiku', session_id: 's' })}\n`);
+      setTimeout(() => {
+        c.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'late but fine', session_id: 's' })}\n`);
+        c.emit('close', 0);
+      }, 120);
+    });
+    expect((await runClaude({ prompt: 'hi', model: 'haiku', cwd: '.', spawnImpl, startupTimeoutMs: 40 })).text).toBe('late but fine');
+  });
+
+  it('marks a process that exited without a word as never having reached the model', async () => {
+    const spawnImpl = fakeSpawn((c) => { c.stderr.write('segfault'); c.emit('close', 139); });
+    const err = (await runClaude({ prompt: 'hi', model: 'haiku', cwd: '.', spawnImpl }).catch((e: unknown) => e)) as SmartError;
+    expect(err.kind).toBe('claude');
+    expect(err.noOutput).toBe(true);
+  });
+
+  it('drops a runaway line instead of buffering it forever', async () => {
+    const { MAX_LINE } = await import('../../src/core/claude.js');
+    const p = new StreamParser();
+    p.push('x'.repeat(MAX_LINE + 1));
+    expect(p.push(`\n${JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', session_id: 's' })}\n`).map((e) => e.kind)).toEqual(['result']);
   });
 });

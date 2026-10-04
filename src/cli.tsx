@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command, InvalidArgumentError } from 'commander';
@@ -6,6 +7,7 @@ import { render } from 'ink';
 import pkg from '../package.json' with { type: 'json' };
 import { resolveClaudeCommand } from './core/claude.js';
 import { createClaudeRunner } from './core/claudeProcess.js';
+import { claudeProjectSettingsWarning } from './core/claudeSettings.js';
 import { classifierCall } from './core/classifier.js';
 import { expandHome, globalConfigPath, loadConfig } from './core/config.js';
 import { EventBus } from './core/events.js';
@@ -17,9 +19,11 @@ import { Pipeline } from './core/pipeline.js';
 import { isTier } from './core/router.js';
 import { buildHistory } from './core/rating/learn.js';
 import { initConfig } from './init.js';
+import { trustProject } from './trust.js';
 import { updateSmart } from './update.js';
 import { describeRating } from './rate.js';
-import { runPrint } from './print.js';
+import { errorDocument, runPrint } from './print.js';
+import { EXIT, exitCodeFor } from './exitCodes.js';
 import { Tracker } from './core/store/tracker.js';
 import { LimitsStore } from './core/store/limits.js';
 import type { ModelTier } from './core/types.js';
@@ -35,10 +39,19 @@ function parseModel(value: string): ModelTier {
 /** True while the interactive UI owns the alternate screen. Errors must be printed after leaving it, or the exit wipes them. */
 let altScreenActive = false;
 
-const fail = (message: string, hint?: string): never => {
+/**
+ * `--output-format json` with `-p`: stdout must hold one JSON document whatever happens, so errors before a task (a bad config,
+ * Claude Code missing) are a JSON error document there too. Read from the raw arguments so it also holds for errors found while parsing them.
+ */
+const rawArgs = process.argv.slice(2);
+const jsonOutput = (rawArgs.includes('-p') || rawArgs.includes('--print')) && (rawArgs.includes('--output-format=json') || rawArgs.some((a, i) => a === '--output-format' && rawArgs[i + 1] === 'json'));
+
+/** Ends smart with an error before or around a task. `kind` picks the exit code (see exitCodes.ts). */
+const fail = (message: string, hint?: string, kind = 'internal'): never => {
   if (altScreenActive) process.stdout.write('\x1b[?1049l');
   process.stderr.write(`smart: ${message}\n${hint ? `${hint}\n` : ''}`);
-  process.exit(1);
+  if (jsonOutput) process.stdout.write(errorDocument(kind, message, hint));
+  process.exit(exitCodeFor(kind, false));
 };
 
 interface Options {
@@ -78,7 +91,10 @@ async function main() {
   const argv = process.argv.slice(2);
   // `smart update` pulls the latest version into the folder smart was cloned to and rebuilds it. Like `init`, only as the
   // whole command line, so a task that starts with the word ("update the readme") still runs as a task.
-  if (argv.length === 1 && argv[0] === 'update') process.exit(updateSmart(fileURLToPath(new URL('..', import.meta.url))));
+  // `--stash` sets your local changes in that folder aside with git stash instead of stopping (see update.ts).
+  if (argv[0] === 'update' && (argv.length === 1 || (argv.length === 2 && argv[1] === '--stash'))) {
+    process.exit(updateSmart(fileURLToPath(new URL('..', import.meta.url)), { stash: argv[1] === '--stash' }));
+  }
 
   // `smart init [--global] [--force]` writes a starter config. Only when it is the whole command line, so a task
   // that merely starts with the word "init" (`smart init the repo`) still runs as a task.
@@ -87,6 +103,14 @@ async function main() {
     const target = initFlags.includes('--global') ? globalConfigPath() : join(process.cwd(), 'smart.config.json');
     const r = initConfig(target, initFlags.includes('--force'));
     process.stdout.write(`${r.message}\n`);
+    process.exit(r.ok ? 0 : 1);
+  }
+
+  // `smart trust [--remove]` allows (or withdraws) the settings of this directory's smart.config.json that cross the trust
+  // boundary. Whole command line only, like `init`.
+  if (argv[0] === 'trust' && (argv.length === 1 || (argv.length === 2 && argv[1] === '--remove'))) {
+    const r = trustProject(process.cwd(), { remove: argv[1] === '--remove' });
+    (r.ok ? process.stdout : process.stderr).write(`${r.message}\n`);
     process.exit(r.ok ? 0 : 1);
   }
 
@@ -107,10 +131,20 @@ async function main() {
     .option('--verbose', 'with --print: also stream tool calls to stderr')
     .option('--budget <usd>', 'stop a task once it has cost this many dollars', parseBudget)
     .option('--no-review', 'skip the acceptance review after each step')
+    .addHelpText('after', '\nExit codes: 0 done, 1 task did not finish, 2 invalid usage or config, 3 Claude Code missing or not logged in,\n4 budget reached, 5 usage limit or API overloaded (try later), 6 nothing to resume, 130 cancelled.')
+    // Invalid options are a usage error (2); help and --version are a success. Commander has already printed the message.
+    .exitOverride((err) => {
+      if (err.code === 'commander.helpDisplayed' || err.code === 'commander.version' || err.code === 'commander.help') process.exit(EXIT.ok);
+      if (jsonOutput) process.stdout.write(errorDocument('config', err.message.replace(/^error: /, '')));
+      process.exit(EXIT.usage);
+    })
     .parse();
 
   const opts = program.opts<Options>();
   if (opts.resume) opts.continue = true;
+  if (!opts.print && (program.getOptionValueSource('outputFormat') === 'cli' || opts.verbose)) {
+    return fail('--output-format and --verbose only apply with -p/--print.', 'Example: smart -p --output-format json "fix the typo"', 'config');
+  }
   const task = program.args.join(' ').trim();
   const cwd = process.cwd();
 
@@ -118,28 +152,36 @@ async function main() {
   try {
     loaded = loadConfig(cwd, opts.config);
   } catch (e) {
-    return fail((e as Error).message);
+    return fail((e as Error).message, undefined, e instanceof SmartError ? e.kind : 'config');
   }
   const { config } = loaded;
-  const configWarnings = loaded.warnings;
+  const claudeSettings = claudeProjectSettingsWarning(cwd);
+  const configWarnings = claudeSettings ? [...loaded.warnings, claudeSettings] : loaded.warnings;
+  const configNotices = loaded.notices;
   if (opts.budget) config.limits.maxBudgetUsdPerTask = opts.budget;
   if (!opts.review) config.review.enabled = false;
 
   if (opts.rate) {
-    if (!task) return fail('give the task to rate: smart --rate "fix the race condition in worker.js"');
+    if (!task) return fail('give the task to rate: smart --rate "fix the race condition in worker.js"', undefined, 'config');
     const tracker = new Tracker(expandHome(config.trackerPath));
-    process.stdout.write(`${describeRating(task, config, buildHistory(tracker.load())).join('\n')}\n`);
+    const ctx = {
+      history: buildHistory(tracker.load(), Date.now(), { topTier: config.escalation.ladder.at(-1) }),
+      limits: new LimitsStore(expandHome(config.limitsPath)).load(),
+      conversation: new ConversationStore(expandHome(config.conversationsPath)).load(cwd),
+    };
+    process.stdout.write(`${describeRating(task, config, ctx).join('\n')}\n`);
     process.exit(0);
   }
 
   const claude = resolveClaudeCommand();
-  if (spawnSync(claude.cmd, [...claude.prefix, '--version'], { stdio: 'ignore' }).error) {
+  // Probed from the home folder: never let a `claude` in the project folder answer for the real one (see core/which.ts).
+  if (claude.missing || spawnSync(claude.cmd, [...claude.prefix, '--version'], { stdio: 'ignore', cwd: homedir(), windowsHide: true }).error) {
     const err = new SmartError('cli_missing', 'The `claude` CLI was not found on your PATH.', 'Install Claude Code (https://docs.claude.com/claude-code), then run `claude` once to log in.');
-    return fail(err.message, err.hint);
+    return fail(err.message, err.hint, err.kind);
   }
   const interactive = process.stdin.isTTY && process.stdout.isTTY;
   if (!opts.print && !interactive) {
-    return fail('an interactive terminal is required (stdin and stdout must be a TTY). Use `smart -p "task"` for scripts and pipes.');
+    return fail('an interactive terminal is required (stdin and stdout must be a TTY). Use `smart -p "task"` for scripts and pipes.', undefined, 'config');
   }
 
   const trackerPath = expandHome(config.trackerPath);
@@ -150,7 +192,7 @@ async function main() {
   const previous = opts.continue ? stored : null;
   // A fresh conversation still keeps the file-undo history of this directory: /undo and /diff work across restarts.
   const conversation = previous ?? (stored?.undo ? { ...newConversation(), undo: stored.undo } : undefined);
-  const startupNotices = [...configWarnings, ...(opts.continue
+  const startupNotices = [...configWarnings, ...configNotices, ...(opts.continue
     ? [previous ? `Continuing your previous conversation here (${previous.tasks.length} earlier task${previous.tasks.length === 1 ? '' : 's'}).` : 'No previous conversation in this directory; starting a new one.']
     : [])];
   const checkpoints = await createCheckpoints(cwd);
@@ -165,9 +207,10 @@ async function main() {
   if (opts.print) {
     let prompt = task;
     if (!prompt && !opts.resume && !process.stdin.isTTY) prompt = await readStdin();
-    if (!prompt && !opts.resume) return fail('with --print, give a task as an argument or on stdin: smart -p "fix the typo in README"');
+    if (!prompt && !opts.resume) return fail('with --print, give a task as an argument or on stdin: smart -p "fix the typo in README"', undefined, 'config');
     pipeline.forceModel(opts.model ?? null);
     for (const w of configWarnings) process.stderr.write(`smart: warning: ${w}\n`);
+    for (const n of configNotices) process.stderr.write(`smart: ${n}\n`);
     // `kill` / `timeout` / a closed terminal must stop Claude Code too, not orphan it (it would keep editing files and spending money).
     const stop = (code: number) => () => {
       pipeline.cancel();
@@ -177,8 +220,8 @@ async function main() {
         process.exit(code);
       });
     };
-    process.on('SIGTERM', stop(143));
-    process.on('SIGHUP', stop(129));
+    process.on('SIGTERM', stop(EXIT.sigterm));
+    process.on('SIGHUP', stop(EXIT.sighup));
     const code = await runPrint(pipeline, bus, prompt, { format: opts.outputFormat, verbose: Boolean(opts.verbose), dryRun: opts.dryRun, noPlan: !opts.plan, resume: opts.resume }, { out: process.stdout, err: process.stderr });
     checkpoints.dispose();
     // process.exit() can drop what is still buffered when stdout is a pipe (output past ~64 KB was lost), so flush first.
@@ -204,7 +247,7 @@ async function main() {
   process.on('exit', restore);
   process.on('SIGTERM', () => {
     pipeline.cancel();
-    void pipeline.settle(3000).then(() => process.exit(143));
+    void pipeline.settle(3000).then(() => process.exit(EXIT.sigterm));
   });
 
   const app = render(
@@ -221,8 +264,8 @@ async function main() {
       oneShot={Boolean(task) || Boolean(opts.resume)}
       terminal={{ write: (seq) => void process.stdout.write(seq) }}
       initial={{ prompt: task, dryRun: opts.dryRun, noPlan: !opts.plan, model: opts.model ?? null, resume: opts.resume }}
-      onExit={(ok) => {
-        exitCode = ok ? 0 : 1;
+      onExit={(code) => {
+        exitCode = code;
       }}
     />,
     // A modest fps cap keeps spinners from redrawing constantly. incrementalRendering is opt-in (SMART_INCREMENTAL=1): see README.

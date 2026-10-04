@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { buildArgs, callError, claudeCommand, debugTiming, runClaude, StreamParser, toSpawnError, writeDebug, type ClaudeCommand, type ClaudeResult, type RunClaudeFn, type RunClaudeOptions } from './claude.js';
+import { assertFound, buildArgs, callError, claudeCommand, MAX_LINE, debugTiming, runClaude, StreamParser, toSpawnError, writeDebug, type ClaudeCommand, type ClaudeResult, type RunClaudeFn, type RunClaudeOptions } from './claude.js';
 import { cancelled, SmartError } from './errors.js';
 import { killTree } from './killTree.js';
 import { sparable, Spares } from './spares.js';
@@ -70,6 +70,7 @@ export class ClaudeProcess {
   ) {
     this.model = first.model;
     const args = [...buildArgs(first), '--input-format', 'stream-json'];
+    if (spawnFn === nodeSpawn) assertFound(command);
     this.child = spawnFn(command.cmd, [...command.prefix, ...args], { cwd: first.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     this.child.stdout?.setEncoding('utf8');
     this.child.stdout?.on('data', (c: string) => this.onData(c));
@@ -99,8 +100,9 @@ export class ClaudeProcess {
     if (o.signal?.aborted) throw cancelled();
     if (o.model !== this.model) {
       try {
-        await this.control({ subtype: 'set_model', model: o.model });
+        await this.control({ subtype: 'set_model', model: o.model }, o.signal);
       } catch (e) {
+        if (o.signal?.aborted) throw cancelled();
         // The process cannot switch: a fresh one started on the new model can.
         throw new ProcessUnusable(e instanceof SmartError ? e : new SmartError('claude', String(e)), true);
       }
@@ -158,16 +160,27 @@ export class ClaudeProcess {
     this.die(err);
   }
 
-  private control(request: Record<string, unknown>): Promise<void> {
+  /** A setting change on the running process; a cancel ends the wait (and the process, which is in an unknown state). */
+  private control(request: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
     const id = `smart-${++this.controlId}`;
     return new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        this.controls.delete(id);
+        settle(() => reject(cancelled()));
+        this.kill();
+      };
       const timer = setTimeout(() => {
         this.controls.delete(id);
-        reject(new SmartError('claude', 'Claude Code did not confirm a setting change.'));
+        settle(() => reject(new SmartError('claude', 'Claude Code did not confirm a setting change.')));
       }, this.limits.controlMs);
       timer.unref?.();
-      const settle = (fn: () => void) => { clearTimeout(timer); fn(); };
+      const settle = (fn: () => void) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        fn();
+      };
       this.controls.set(id, { resolve: () => settle(resolve), reject: (e) => settle(() => reject(e)) });
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.write({ type: 'control_request', request_id: id, request });
     });
   }
@@ -181,6 +194,7 @@ export class ClaudeProcess {
     this.buffer += chunk;
     const lines = this.buffer.split('\n');
     this.buffer = lines.pop() ?? '';
+    if (this.buffer.length > MAX_LINE) this.buffer = ''; // see StreamParser.push
     for (const line of lines) this.onLine(line);
   }
 
@@ -272,11 +286,22 @@ export function createClaudeRunner(opts: { keepAlive: boolean; idleMs?: number; 
   let usable = opts.keepAlive;
   const spares = opts.keepAlive && opts.spares !== false ? new Spares(() => opts.command ?? claudeCommand(), opts.spawnImpl ?? nodeSpawn) : null;
 
-  /** A tool-less one-shot call: on a spare process when one is ready, then a spare is started for the next such call. */
+  /**
+   * A tool-less one-shot call: on a spare process when one is ready, then a spare is started for the next such call. A spare
+   * that turns out to be dead (it exited while waiting, or never says anything) has received nothing the model saw, so the
+   * call simply runs again on a fresh process instead of failing.
+   */
   const spared = async (o: RunClaudeOptions): Promise<ClaudeResult> => {
     const child = spares!.take(o);
     try {
-      return child ? await oneShot({ ...o, streamInput: true, spawnImpl: (() => child) as unknown as typeof nodeSpawn }) : await oneShot(o);
+      if (!child) return await oneShot(o);
+      try {
+        return await oneShot({ ...o, streamInput: true, spawnImpl: (() => child) as unknown as typeof nodeSpawn });
+      } catch (e) {
+        if (!(e instanceof SmartError && e.noOutput) || o.signal?.aborted) throw e;
+        writeDebug({ spare: 'dead, retried on a fresh process', reason: e.message });
+        return await oneShot(o);
+      }
     } finally {
       if (!o.signal?.aborted) spares!.warm(o);
     }
@@ -293,6 +318,24 @@ export function createClaudeRunner(opts: { keepAlive: boolean; idleMs?: number; 
   /** Ends a session's process and waits for it to exit, so two Claude Code processes never hold one session at once. */
   const replace = async (id: string) => {
     await drop(id)?.closed(REPLACE_WAIT_MS);
+  };
+
+  /**
+   * Calls on one Claude Code session run one after another: two processes resuming the same session at once would both
+   * append to its transcript. (The pipeline never overlaps calls; this keeps any other caller from doing so.)
+   */
+  const queues = new Map<string, Promise<unknown>>();
+  const serial = (o: RunClaudeOptions): Promise<ClaudeResult> => {
+    if (!o.session) return run(o);
+    const id = o.session.id;
+    const prev = queues.get(id) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(() => run(o));
+    const tail = next.catch(() => undefined);
+    queues.set(id, tail);
+    void tail.then(() => {
+      if (queues.get(id) === tail) queues.delete(id);
+    });
+    return next;
   };
 
   const run = async (o: RunClaudeOptions): Promise<ClaudeResult> => {
@@ -338,7 +381,7 @@ export function createClaudeRunner(opts: { keepAlive: boolean; idleMs?: number; 
       return oneShot(o);
     }
   };
-  return Object.assign(run, {
+  return Object.assign(serial, {
     warm: (o: RunClaudeOptions) => {
       if (usable) spares?.warm(o);
     },

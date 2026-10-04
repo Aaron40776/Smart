@@ -78,3 +78,55 @@ describe('singleStepPlan', () => {
     expect(singleStepPlan('fix bug').steps[0]?.instructions).toBe('fix bug');
   });
 });
+
+describe('parsePlan: planner output is untrusted', () => {
+  const step = (over: object = {}) => ({ title: 'Add parser', instructions: 'Parse the input in src/parse.ts', acceptance: ['parses'], ...over });
+
+  it('drops file references that are not plain project paths and says which', () => {
+    const r = parsePlan({ summary: 's', steps: [step({ files: ['src/a.ts', '../../etc/passwd', '/etc/shadow', '\\\\evil\\share\\x', 'src/a.ts', ''] })] }, 6)!;
+    expect(r.plan.steps[0]!.files).toEqual(['src/a.ts']);
+    expect(r.droppedFiles).toEqual(['../../etc/passwd', '/etc/shadow', '\\\\evil\\share\\x']);
+  });
+
+  it('drops empty and repeated steps, renumbers the rest, and is null when nothing is left', () => {
+    const r = parsePlan({ summary: 's', steps: [step(), step(), step({ title: '   ' }), step({ title: 'Second', instructions: 'Other' })] }, 6)!;
+    expect(r.plan.steps.map((s) => [s.id, s.title])).toEqual([['s1', 'Add parser'], ['s2', 'Second']]);
+    expect(r.droppedSteps).toBe(2);
+    expect(parsePlan({ summary: 's', steps: [step({ title: ' ', instructions: ' ' })] }, 6)).toBeNull();
+  });
+
+  it('caps lengths and counts, and strips terminal escape sequences from what is shown', () => {
+    const r = parsePlan({
+      summary: `Plan \u001b]0;pwned\u0007 ${'x'.repeat(1000)}`,
+      features: Array.from({ length: 50 }, (_, i) => `f${i}`),
+      steps: [step({ title: `\u001b[2J\u001b[HTitle ${'y'.repeat(500)}`, instructions: 'z'.repeat(10_000), acceptance: ['a', 'b', 'c', 'd', 'e', 'f', 'g'], files: Array.from({ length: 40 }, (_, i) => `f${i}.ts`) })],
+    }, 6)!;
+    const s = r.plan.steps[0]!;
+    expect(s.title.startsWith('Title ')).toBe(true);
+    expect(s.title.length).toBeLessThanOrEqual(120);
+    expect(s.instructions.length).toBeLessThanOrEqual(2000);
+    expect(s.acceptance).toHaveLength(5);
+    expect(s.files).toHaveLength(20);
+    expect(r.plan.summary.includes('\u001b') || r.plan.summary.includes('\u0007')).toBe(false);
+    expect(r.plan.summary.length).toBeLessThanOrEqual(300);
+    expect(r.plan.features).toHaveLength(20);
+  });
+
+  it('ignores fields the planner has no say over (a model tier) and keeps its difficulty rating', () => {
+    const p = parsePlan({ summary: 's', steps: [step({ tier: 'opus', model: 'claude-opus', difficulty: 'hard' })] }, 6)!.plan;
+    expect(p.steps[0]).not.toHaveProperty('tier');
+    expect(p.steps[0]).not.toHaveProperty('model');
+    expect(p.steps[0]!.difficulty).toBe('hard');
+  });
+
+  it('rejects partial or wrongly shaped output, so the task runs as one step', () => {
+    for (const bad of [undefined, '', {}, { steps: [] }, { steps: 'all of them' }, { steps: [{ title: 'x' }] }, [step()]]) expect(parsePlan(bad, 6)).toBeNull();
+  });
+
+  it('makePlan tells you what it dropped', async () => {
+    const run = async () => ({ isError: false, subtype: 'success', text: '', structured: { summary: 's', steps: [step({ files: ['C:\\Windows\\win.ini'] }), step()] }, usage: emptyUsage(), sessionId: 's', numTurns: 1 });
+    const out = await makePlan('build', cls, { config: defaultConfig(), cwd: '.', run });
+    expect(out.warning).toMatch(/Dropped 1 empty or repeated step/);
+    if (process.platform === 'win32') expect(out.warning).toMatch(/not plain project paths/);
+  });
+});

@@ -1,5 +1,6 @@
-import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { closeSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { looksSecret, realPathOf, resolveInside } from './paths.js';
 
 const slash = (p: string): string => p.split(sep).join('/');
 import type { ClaudeStreamEvent, RunClaudeFn } from './claude.js';
@@ -12,35 +13,31 @@ export interface FileContext {
   truncated: boolean;
 }
 
+export interface GatherOptions {
+  /** Allow absolute paths that resolve inside the project (paths you typed). Model output never gets this. */
+  allowAbsolute?: boolean;
+  /** Leave out files that usually hold secrets (`.env`, keys): for files smart picks itself, not ones you @mention. */
+  skipSecrets?: boolean;
+}
+
 /**
- * Reads the files a step names, within a byte budget. Only files inside `cwd` are read
- * (a plan is model output, so `../../etc/passwd` or a symlink out must not leak into a prompt).
+ * Reads the files a step names, within a byte budget. Only regular files inside `cwd` are read (a plan is model output, so
+ * `../../etc/passwd`, `\\server\share\x` or a symlink out must not leak into a prompt; see paths.ts), each one once.
  */
-export function gatherFiles(cwd: string, files: string[], maxBytes: number): FileContext[] {
+export function gatherFiles(cwd: string, files: string[], maxBytes: number, opts: GatherOptions = {}): FileContext[] {
   const out: FileContext[] = [];
   if (maxBytes <= 0) return out;
-  let root: string;
-  try {
-    root = realpathSync(cwd);
-  } catch {
-    return out;
-  }
   let budget = maxBytes;
+  const seen = new Set<string>();
   for (const f of files) {
     if (budget <= 0) break;
-    const abs = resolve(cwd, f);
-    if (!existsSync(abs)) continue;
-    let real: string;
-    try {
-      real = realpathSync(abs);
-    } catch {
-      continue;
-    }
-    const rel = relative(root, real);
-    if (rel === '' || rel.startsWith('..' + sep) || rel === '..' || isAbsolute(rel)) continue;
+    const inside = resolveInside(cwd, f, { allowAbsolute: opts.allowAbsolute });
+    if (!inside || inside.rel === '' || seen.has(inside.abs)) continue;
+    if (opts.skipSecrets && looksSecret(inside.rel)) continue;
+    seen.add(inside.abs);
     try {
       // Read at most the budget (+1 byte to know if it was cut): a referenced multi-GB log must not be loaded whole.
-      const fd = openSync(real, 'r');
+      const fd = openSync(inside.abs, 'r');
       let buf: Buffer;
       let size: number;
       try {
@@ -54,26 +51,13 @@ export function gatherFiles(cwd: string, files: string[], maxBytes: number): Fil
       }
       if (buf.subarray(0, 8000).includes(0)) continue; // binary
       const slice = buf.subarray(0, budget);
-      out.push({ path: slash(rel) || f, content: slice.toString('utf8'), truncated: size > slice.length });
+      out.push({ path: inside.rel || f, content: slice.toString('utf8'), truncated: size > slice.length });
       budget -= slice.length;
     } catch {
       continue;
     }
   }
   return out;
-}
-
-/** The real path of `p`, or of its folder when the file itself is gone (deleted by the step), else `p` unchanged. */
-function realPath(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    try {
-      return join(realpathSync(dirname(p)), basename(p));
-    } catch {
-      return p;
-    }
-  }
 }
 
 /**
@@ -85,7 +69,7 @@ export function projectRelative(cwd: string, file: string): string {
   if (plain !== '' && !plain.startsWith('..')) return slash(plain);
   try {
     // Resolve both sides: the file's own path can pass through a symlink too (macOS: /var is /private/var).
-    const viaReal = relative(realpathSync(cwd), realPath(resolve(cwd, file)));
+    const viaReal = relative(realpathSync(cwd), realPathOf(resolve(cwd, file)));
     if (viaReal !== '' && !viaReal.startsWith('..') && !isAbsolute(viaReal)) return slash(viaReal);
   } catch {
     /* fall through */
@@ -165,7 +149,8 @@ export interface StepRunResult {
 
 /** Runs one plan step as one headless Claude Code call on the routed model. */
 export async function runStep(o: RunStepOptions): Promise<StepRunResult> {
-  const own = gatherFiles(o.cwd, o.step.files, o.config.limits.maxContextBytes);
+  // A plan step's files are model output: plain project paths only, and no secrets pasted in on smart's own initiative.
+  const own = gatherFiles(o.cwd, o.step.files, o.config.limits.maxContextBytes, { skipSecrets: true });
   const fileContext = [...(o.referenced ?? []), ...own.filter((f) => !o.referenced?.some((r) => r.path === f.path))];
   const prompt = buildStepPrompt({ ...o, fileContext });
   const touched = new Set<string>();

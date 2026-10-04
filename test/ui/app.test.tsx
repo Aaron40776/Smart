@@ -96,6 +96,20 @@ describe('App', () => {
     await waitFor(() => !lastFrame()!.includes('[mode:plan]'));
   });
 
+  it('makes bypass mode obvious in the header, from config or /mode, and quiet in the default mode', async () => {
+    const quiet = render(<App {...makeApp()} />);
+    await waitFor(() => quiet.lastFrame()!.includes('smart'));
+    expect(quiet.lastFrame()).not.toContain('bypass');
+    const cfg = render(<App {...makeApp({ config: (c) => { c.runner.permissionMode = 'bypassPermissions'; } })} />);
+    await waitFor(() => cfg.lastFrame()!.includes('bypass: runs any command'));
+    const { stdin, lastFrame } = render(<App {...makeApp()} />);
+    await type(stdin, '/mode bypass');
+    await waitFor(() => lastFrame()!.includes('bypass: runs any command'));
+    expect(lastFrame()).toContain('without asking');
+    await type(stdin, '/mode default');
+    await waitFor(() => !lastFrame()!.includes('bypass: runs any command'));
+  });
+
   it('/undo and /diff say so when there is no git repository to work with', async () => {
     const { stdin, lastFrame } = render(<App {...makeApp()} />);
     await type(stdin, '/undo');
@@ -232,7 +246,7 @@ describe('App', () => {
     const onExit = vi.fn();
     render(<App {...makeApp({ complexity: 'trivial' })} initial={{ prompt: 'quick question' }} oneShot onExit={onExit} />);
     await waitFor(() => onExit.mock.calls.length === 1, 4000);
-    expect(onExit).toHaveBeenCalledWith(true);
+    expect(onExit).toHaveBeenCalledWith(0);
   });
 
   it('one-shot mode reports failure', async () => {
@@ -245,7 +259,7 @@ describe('App', () => {
     await waitFor(() => lastFrame()!.includes('Run `claude` to log in'), 4000);
     expect(lastFrame()).toContain('not logged in');
     await waitFor(() => onExit.mock.calls.length === 1, 4000);
-    expect(onExit).toHaveBeenCalledWith(false);
+    expect(onExit).toHaveBeenCalledWith(3); // the same exit code as `smart -p`: Claude Code not available
   });
 
   it('Tab moves focus between panels', async () => {
